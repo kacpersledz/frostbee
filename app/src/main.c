@@ -29,11 +29,15 @@
 LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
 /* Forward declarations */
-static void sensor_read_and_update(zb_bufid_t bufid);
-static void sensor_read_only(void);
+static void sensor_periodic(zb_bufid_t bufid);
+static void battery_periodic(zb_bufid_t bufid);
+static void sensor_read(void);
+static void battery_read(void);
+static void sensor_and_battery_read(void);
 
-/* Sensor read interval in seconds (used for ZBOSS alarm scheduling). */
-#define SENSOR_READ_INTERVAL_S  10  /* 10s for dev, 600s for production */
+/* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
+#define SENSOR_READ_INTERVAL_S   600    /* 10 minutes - temp/humidity */
+#define BATTERY_READ_INTERVAL_S  86400  /* 24 hours - battery voltage */
 
 /* Reset button timing (milliseconds) */
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
@@ -200,8 +204,8 @@ static void debounce_handler(struct k_work *work)
 			int64_t hold_time = k_uptime_get() - button_press_time;
 
 			if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
-				LOG_INF("Short press - forcing sensor read");
-				sensor_read_only();
+				LOG_INF("Short press - forcing sensor+battery read");
+				sensor_and_battery_read();
 			} else {
 				LOG_INF("Button released after %lld ms (no action)", hold_time);
 			}
@@ -554,11 +558,10 @@ static uint8_t read_battery_voltage(void)
 
 /* ─── Sensor reading & ZCL attribute update ─── */
 
-/* Read sensor and update ZCL attributes (without rescheduling).
- * Used by button handler for on-demand reads.
+/* Read temperature/humidity sensor and update ZCL attributes.
  * Thread-safe via mutex - can be called from button or timer context.
  */
-static void sensor_read_only(void)
+static void sensor_read(void)
 {
 	struct sensor_value temp, hum;
 	int ret;
@@ -615,6 +618,14 @@ static void sensor_read_only(void)
 		(zb_uint8_t *)&hum_zcl,
 		ZB_FALSE);
 
+	k_mutex_unlock(&sensor_mutex);
+}
+
+/* Read battery voltage and update ZCL attributes.
+ * Thread-safe - can be called from button or timer context.
+ */
+static void battery_read(void)
+{
 	/* Read battery voltage via ADC */
 	read_battery_voltage();
 
@@ -634,23 +645,41 @@ static void sensor_read_only(void)
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
 		(zb_uint8_t *)&dev_ctx.battery_percentage,
 		ZB_FALSE);
-
-	k_mutex_unlock(&sensor_mutex);
 }
 
-/* Periodic sensor read callback (called by Zigbee alarm scheduler).
- * Reads sensor and reschedules next read.
+/* Read both sensor and battery (used by button handler for on-demand reads).
+ * Does not affect periodic timers.
  */
-static void sensor_read_and_update(zb_bufid_t bufid)
+static void sensor_and_battery_read(void)
+{
+	sensor_read();
+	battery_read();
+}
+
+/* Periodic sensor read callback (called by Zigbee alarm scheduler). */
+static void sensor_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
-	sensor_read_only();
+	sensor_read();
 
-	/* Schedule next periodic read */
-	ZB_SCHEDULE_APP_ALARM(sensor_read_and_update, 0,
+	/* Schedule next periodic sensor read */
+	ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
 				      SENSOR_READ_INTERVAL_S * 1000));
+}
+
+/* Periodic battery read callback (called by Zigbee alarm scheduler). */
+static void battery_periodic(zb_bufid_t bufid)
+{
+	ARG_UNUSED(bufid);
+
+	battery_read();
+
+	/* Schedule next periodic battery read */
+	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
+				      BATTERY_READ_INTERVAL_S * 1000));
 }
 
 /* ─── Zigbee signal handler ─── */
@@ -667,11 +696,13 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	case ZB_BDB_SIGNAL_STEERING:
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
-			LOG_INF("Joined network, starting sensor reads");
-			/* Start periodic sensor reading */
-			ZB_SCHEDULE_APP_ALARM(sensor_read_and_update, 0,
-					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
-						      1000));
+			LOG_INF("Joined network, starting periodic reads");
+			/* Start periodic sensor reading (temp/humidity every 10 min) */
+			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
+					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			/* Start periodic battery reading (voltage every 24h) */
+			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
+					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 		}
 		break;
 
