@@ -37,7 +37,7 @@ static void sensor_and_battery_read(void);
 
 /* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
 #define SENSOR_READ_INTERVAL_S   600    /* 10 minutes - temp/humidity */
-#define BATTERY_READ_INTERVAL_S  86400  /* 24 hours - battery voltage */
+#define BATTERY_READ_INTERVAL_S  64800  /* 18 hours - aligned with ZCL max reporting interval */
 
 /* Reset button timing (milliseconds) */
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
@@ -301,7 +301,7 @@ zb_zcl_attr_t power_config_attr_list[] = {
 	{
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
 		ZB_ZCL_ATTR_TYPE_U8,
-		ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
 		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
 		(void *)&dev_ctx.battery_voltage
 	},
