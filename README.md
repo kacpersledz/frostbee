@@ -10,7 +10,7 @@ and ZBOSS Zigbee stack (Sleepy End Device).
 - 🌡️ **Temperature & Humidity** — Sensirion SHT40 sensor (±0.2°C, ±1.8% RH accuracy)
 - 🔋 **Battery monitoring** — Real-time voltage/percentage via ADC (3× AA batteries)
 - 🐝 **Zigbee 3.0** — Sleepy end device with persistent network storage
-- ⏱️ **Power optimized** — 10-minute sensor reads, 24-hour battery reads (~150-200 µA idle)
+- ⏱️ **Power optimized** — 10-minute sensor reads, 18-hour battery reads (~150-200 µA idle)
 - 🔘 **Reset button** — Short press: force read, Long press: factory reset
 - 🏠 **Home Assistant** — Works with Zigbee2MQTT and ZHA out of the box
 - 🔌 **UF2 bootloader** — Safe firmware updates via drag-and-drop (no programmer needed)
@@ -43,14 +43,14 @@ BAT+ ─── R1 (10kΩ) ─── [P0.29/ADC] ─┬─── R2 (10kΩ) ─�
 
 **How it works:**
 - **P0.02** is configured as **INPUT** (high-Z) when not measuring → 0µA power consumption
-- During measurement (once per 24h), **P0.02** is set to **OUTPUT LOW** → connects divider to GND
+- During measurement (once per 18h), **P0.02** is set to **OUTPUT LOW** → connects divider to GND
 - ADC reads voltage on **P0.29**, then **P0.02** returns to INPUT mode
 - Measurement duration: ~2ms per reading
 
 **Components:**
 - R1, R2: 10kΩ (voltage divider 1:2, scales 4.5V → 2.25V for ADC)
 - C1: 0.1µF (noise filtering, RC time constant = 1ms)
-- Power consumption: 150µA for ~2ms once/day (negligible)
+- Power consumption: 150µA for ~2ms every 18h (negligible)
 
 **Voltage ranges:**
 - 3× AA fresh: 4.5V → 2.25V at ADC → 100% battery
@@ -64,7 +64,7 @@ The device uses separate timers for optimal battery life:
 | Measurement | Interval | Rationale |
 |-------------|----------|-----------|
 | **Temperature/Humidity** | 600s (10 min) | Outdoor temps change slowly; sufficient for weather monitoring |
-| **Battery Voltage** | 86400s (24h) | Battery degrades over days/weeks; daily check is enough |
+| **Battery Voltage** | 64800s (18h) | Aligned with ZCL max reporting interval (65000s) |
 
 **Zigbee Reporting:** The coordinator (Z2M/ZHA) configures reporting independently via *Configure Reporting* command:
 - **Min interval:** Don't report more often than X seconds (e.g., 60s)
@@ -93,7 +93,7 @@ Copy the `.uf2` from `build/zephyr/` to the dongle in bootloader mode
 - ✅ **Logging enabled** (USB CDC serial, 115200 baud) — for development/debugging
 - ✅ **ZBOSS NVRAM included** (32KB + 16KB) — network persists across reboots
 - ✅ **RAM power-down off** — safe for UF2 bootloader (double-tap reset works)
-- ✅ **Production intervals** — 600s sensor, 86400s battery
+- ✅ **Production intervals** — 600s sensor, 64800s battery
 - ⚡ **Idle current:** ~150-200 µA (good for 1-2 years on 3× AA batteries)
 
 ### Future battery optimizations (requires SWD access)

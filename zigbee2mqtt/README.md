@@ -126,11 +126,16 @@ const definition = {
     zigbeeModel: ['FBE_TH_1'],
     model: 'FBE_TH_1',
     vendor: 'Frostbee',
-    description: 'Temperature & humidity sensor (SHT40, nRF52840)',
+    description: 'Temperature & humidity sensor (SHT40)',
     extend: [
-        temperature(),
-        humidity(),
-        battery(),
+        battery({
+            voltage: true,
+            voltageReporting: true,
+            percentageReportingConfig: {min: 3600, max: 65000, change: 2},
+            voltageReportingConfig: {min: 3600, max: 65000, change: 2},
+        }),
+        temperature({reporting: {min: 600, max: 3600, change: 10}}),
+        humidity({reporting: {min: 600, max: 3600, change: 50}}),
     ],
 };
 
@@ -153,7 +158,7 @@ If temperature/humidity work but battery doesn't show:
 1. Check ZCL Power Configuration cluster is bound
 2. In Z2M device page → "Clusters" → ensure `genPowerCfg` is listed
 3. Force a reading: Press the reset button briefly on the device
-4. Wait for the next sensor update (every 10 seconds)
+4. Wait for the next battery update (every 18 hours)
 
 ## Migration from v1.x
 
