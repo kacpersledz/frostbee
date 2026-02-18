@@ -661,6 +661,7 @@ static void sensor_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
+	LOG_INF("sensor_periodic alarm fired");
 	sensor_read();
 
 	/* Schedule next periodic sensor read */
@@ -674,12 +675,19 @@ static void battery_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
+	LOG_INF("battery_periodic alarm fired");
 	battery_read();
 
-	/* Schedule next periodic battery read */
+	/* Schedule next periodic battery read.
+	 * NOTE: Cannot pass BATTERY_READ_INTERVAL_S * 1000 directly to
+	 * ZB_MILLISECONDS_TO_BEACON_INTERVAL because the macro multiplies by
+	 * 1000 internally (ms→µs), causing 86400*1000*1000 = 86.4e9 to overflow
+	 * uint32_t (~4.29e9 max), which wraps to ~500 s instead of 24 h.
+	 * Fix: compute as seconds × beacons_per_second to stay in range.
+	 */
 	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
-			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
-				      BATTERY_READ_INTERVAL_S * 1000));
+			      (zb_time_t)BATTERY_READ_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
 /* ─── Zigbee signal handler ─── */
@@ -689,6 +697,9 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	zb_zdo_app_signal_hdr_t *sig_hndler = NULL;
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
 	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
+
+	/* Debug: log all signals to diagnose alarm scheduling issues */
+	LOG_INF("Zigbee signal: %d, status: %d", sig, status);
 
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
@@ -700,9 +711,13 @@ void zboss_signal_handler(zb_bufid_t bufid)
 			/* Start periodic sensor reading (temp/humidity every 10 min) */
 			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			LOG_INF("Scheduled sensor_periodic in 1s");
 			/* Start periodic battery reading (voltage every 24h) */
 			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			LOG_INF("Scheduled battery_periodic in 1s");
+		} else {
+			LOG_WRN("Join signal received but status=%d (not RET_OK)", status);
 		}
 		break;
 
