@@ -1,7 +1,7 @@
 name: Build UF2
 
 # Build UF2 firmware on every push and pull request.
-# On version tags (v*), the UF2 is also attached to a GitHub Release.
+# On version tags (v*) the UF2 is also attached to a GitHub Release.
 
 on:
   push:
@@ -12,26 +12,67 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      # Check out into app/ so the west workspace can be initialised
+      # in the workspace root alongside the SDK module directories.
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Check out into a subdirectory so the SDK west workspace
-          # can be initialised in the parent directory alongside it.
           path: app
 
-      # Installs nrfutil, the nRF Connect SDK v2.9.2 toolchain (arm-zephyr-eabi),
-      # and all west modules (Zephyr, nRF SDK, ZBOSS r23, …).
-      - name: Set up nRF Connect SDK v2.9.2
-        uses: nrfconnect/action-nrf-connect-sdk@v1
+      # ── nrfutil ────────────────────────────────────────────────────────────
+      - name: Install nrfutil
+        run: |
+          curl -Lo nrfutil \
+            "https://files.nordicsemi.com/ui/api/v1/download?repoKey=swtools&path=external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil"
+          chmod +x nrfutil
+          sudo mv nrfutil /usr/local/bin/nrfutil
+          nrfutil install toolchain-manager
+
+      # ── Toolchain (arm-zephyr-eabi + CMake/Ninja/Python) ──────────────────
+      - name: Cache nRF Connect SDK toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
         with:
-          sdk-version: 2.9.2
-          toolchain-version: v2.9.2
+          path: ~/.local/share/ncs/toolchains
+          key: ncs-toolchain-v2.9.2-${{ runner.os }}
 
-      # west build writes the UF2 to build/zephyr/zephyr.uf2 because
-      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf.
+      - name: Install nRF Connect SDK toolchain v2.9.2
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: nrfutil toolchain-manager install --ncs-version v2.9.2
+
+      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 + …) ─────────────────
+      - name: Cache west modules
+        id: cache-west
+        uses: actions/cache@v4
+        with:
+          path: |
+            .west
+            bootloader
+            mbedtls
+            modules
+            nrf
+            nrfxlib
+            tools
+            zephyr
+          key: west-modules-ncs-v2.9.2
+
+      - name: Initialise west workspace (nRF Connect SDK v2.9.2)
+        if: steps.cache-west.outputs.cache-hit != 'true'
+        run: |
+          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
+            west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.9.2
+          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
+            west update --narrow -o=--depth=1
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      # CONFIG_BUILD_OUTPUT_UF2=y is already in app/prj.conf, so west build
+      # produces build/zephyr/zephyr.uf2 automatically.
       - name: Build firmware (nrf52840dongle)
-        run: west build -b nrf52840dongle/nrf52840 app/app --build-dir build
+        run: |
+          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
+            west build -b nrf52840dongle/nrf52840 app/app --build-dir build
 
+      # ── Artifacts ──────────────────────────────────────────────────────────
       - name: Upload UF2 artifact
         uses: actions/upload-artifact@v4
         with:
@@ -39,7 +80,6 @@ jobs:
           path: build/zephyr/zephyr.uf2
           if-no-files-found: error
 
-      # Only on version tags: attach the UF2 to a GitHub Release.
       - name: Attach UF2 to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
