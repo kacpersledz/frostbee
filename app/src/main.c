@@ -661,6 +661,7 @@ static void sensor_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
+	LOG_INF("sensor_periodic alarm fired");
 	sensor_read();
 
 	/* Schedule next periodic sensor read */
@@ -674,6 +675,7 @@ static void battery_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
+	LOG_INF("battery_periodic alarm fired");
 	battery_read();
 
 	/* Schedule next periodic battery read.
@@ -696,6 +698,9 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
 	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
 
+	/* Debug: log all signals to diagnose alarm scheduling issues */
+	LOG_INF("Zigbee signal: %d, status: %d", sig, status);
+
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
 		/* fall-through */
@@ -706,9 +711,13 @@ void zboss_signal_handler(zb_bufid_t bufid)
 			/* Start periodic sensor reading (temp/humidity every 10 min) */
 			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			LOG_INF("Scheduled sensor_periodic in 1s");
 			/* Start periodic battery reading (voltage every 24h) */
 			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			LOG_INF("Scheduled battery_periodic in 1s");
+		} else {
+			LOG_WRN("Join signal received but status=%d (not RET_OK)", status);
 		}
 		break;
 
