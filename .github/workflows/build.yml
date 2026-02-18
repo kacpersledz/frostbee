@@ -1,0 +1,47 @@
+name: Build UF2
+
+# Build UF2 firmware on every push and pull request.
+# On version tags (v*), the UF2 is also attached to a GitHub Release.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Check out into a subdirectory so the SDK west workspace
+          # can be initialised in the parent directory alongside it.
+          path: app
+
+      # Installs nrfutil, the nRF Connect SDK v2.9.2 toolchain (arm-zephyr-eabi),
+      # and all west modules (Zephyr, nRF SDK, ZBOSS r23, …).
+      - name: Set up nRF Connect SDK v2.9.2
+        uses: nrfconnect/action-nrf-connect-sdk@v1
+        with:
+          sdk-version: 2.9.2
+          toolchain-version: v2.9.2
+
+      # west build writes the UF2 to build/zephyr/zephyr.uf2 because
+      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf.
+      - name: Build firmware (nrf52840dongle)
+        run: west build -b nrf52840dongle/nrf52840 app/app --build-dir build
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frostbee-${{ github.sha }}
+          path: build/zephyr/zephyr.uf2
+          if-no-files-found: error
+
+      # Only on version tags: attach the UF2 to a GitHub Release.
+      - name: Attach UF2 to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/zephyr/zephyr.uf2
