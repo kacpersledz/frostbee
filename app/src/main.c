@@ -661,7 +661,6 @@ static void sensor_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
-	LOG_INF("sensor_periodic alarm fired");
 	sensor_read();
 
 	/* Schedule next periodic sensor read */
@@ -675,7 +674,6 @@ static void battery_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
-	LOG_INF("battery_periodic alarm fired");
 	battery_read();
 
 	/* Schedule next periodic battery read.
@@ -698,8 +696,8 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
 	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
 
-	/* Debug: log all signals to diagnose alarm scheduling issues */
-	LOG_INF("Zigbee signal: %d, status: %d", sig, status);
+	/* Verbose signal tracing - only visible at LOG_LEVEL_DBG */
+	LOG_DBG("Zigbee signal: %d, status: %d", sig, status);
 
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
