@@ -16,11 +16,11 @@
 #define FROSTBEE_IN_CLUSTER_NUM        5
 #define FROSTBEE_OUT_CLUSTER_NUM       1
 
-/* Reportable attributes: temperature + humidity + battery percentage */
+/* Reportable attributes: temperature + humidity + battery voltage + battery percentage */
 #define FROSTBEE_REPORT_ATTR_COUNT     \
 	(ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT + \
 	 ZB_ZCL_REL_HUMIDITY_MEASUREMENT_REPORT_ATTR_COUNT + \
-	 ZB_ZCL_POWER_CONFIG_REPORT_ATTR_COUNT)
+	 2) /* battery voltage + battery percentage remaining */
 
 /** @brief Declare cluster list for Frostbee sensor device. */
 #define ZB_DECLARE_FROSTBEE_CLUSTER_LIST(                            \

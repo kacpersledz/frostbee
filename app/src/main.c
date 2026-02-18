@@ -301,7 +301,7 @@ zb_zcl_attr_t power_config_attr_list[] = {
 	{
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
 		ZB_ZCL_ATTR_TYPE_U8,
-		ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
 		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
 		(void *)&dev_ctx.battery_voltage
 	},
