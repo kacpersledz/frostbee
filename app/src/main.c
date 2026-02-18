@@ -676,10 +676,16 @@ static void battery_periodic(zb_bufid_t bufid)
 
 	battery_read();
 
-	/* Schedule next periodic battery read */
+	/* Schedule next periodic battery read.
+	 * NOTE: Cannot pass BATTERY_READ_INTERVAL_S * 1000 directly to
+	 * ZB_MILLISECONDS_TO_BEACON_INTERVAL because the macro multiplies by
+	 * 1000 internally (ms→µs), causing 86400*1000*1000 = 86.4e9 to overflow
+	 * uint32_t (~4.29e9 max), which wraps to ~500 s instead of 24 h.
+	 * Fix: compute as seconds × beacons_per_second to stay in range.
+	 */
 	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
-			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
-				      BATTERY_READ_INTERVAL_S * 1000));
+			      (zb_time_t)BATTERY_READ_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
 /* ─── Zigbee signal handler ─── */
