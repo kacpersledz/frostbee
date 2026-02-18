@@ -37,7 +37,7 @@ static void sensor_and_battery_read(void);
 
 /* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
 #define SENSOR_READ_INTERVAL_S   600    /* 10 minutes - temp/humidity */
-#define BATTERY_READ_INTERVAL_S  86400  /* 24 hours - battery voltage */
+#define BATTERY_READ_INTERVAL_S  64800  /* 18 hours - aligned with ZCL max reporting interval */
 
 /* Reset button timing (milliseconds) */
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
