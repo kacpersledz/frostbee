@@ -11,9 +11,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     container:
-      # Toolchain ID b77d8c1312 corresponds to nRF Connect SDK v2.9.2.
-      # Recompute with: cat scripts/requirements-fixed.txt scripts/tools-versions-linux.yml | tr -d '\r' | sha256sum | head -c 10
-      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:b77d8c1312
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
     defaults:
       run:
         shell: bash  # required — toolchain env vars are only set in bash sessions
