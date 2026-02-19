@@ -1,6 +1,6 @@
 name: Build UF2
 
-# Build UF2 firmware on every push and pull request.
+# Build UF2 firmware on every push.
 # On version tags (v*) the UF2 is also attached to a GitHub Release.
 
 on:
@@ -23,7 +23,9 @@ jobs:
         with:
           path: app
 
-      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 + …) ─────────────────
+      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 add-on + …) ──────────
+      # ncs-zigbee v1.2.1 is the manifest; it imports sdk-nrf v2.9.2 and
+      # adds the ncs-zigbee module itself (defines CONFIG_ZIGBEE_ADD_ON).
       - name: Cache west modules
         id: cache-west
         uses: actions/cache@v4
@@ -33,16 +35,17 @@ jobs:
             bootloader
             mbedtls
             modules
+            ncs-zigbee
             nrf
             nrfxlib
             tools
             zephyr
-          key: west-modules-ncs-v2.9.2
+          key: west-modules-ncs-zigbee-v1.2.1
 
-      - name: Initialise west workspace (nRF Connect SDK v2.9.2)
+      - name: Initialise west workspace (ncs-zigbee v1.2.1 / NCS v2.9.2)
         if: steps.cache-west.outputs.cache-hit != 'true'
         run: |
-          west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.9.2
+          west init -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           west update --narrow -o=--depth=1
 
       # ── Build ──────────────────────────────────────────────────────────────
