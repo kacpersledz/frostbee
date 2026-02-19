@@ -10,6 +10,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    container:
+      # Toolchain ID b77d8c1312 corresponds to nRF Connect SDK v2.9.2.
+      # Recompute with: cat scripts/requirements-fixed.txt scripts/tools-versions-linux.yml | tr -d '\r' | sha256sum | head -c 10
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:b77d8c1312
+    defaults:
+      run:
+        shell: bash  # required — toolchain env vars are only set in bash sessions
 
     steps:
       # Check out into app/ so the west workspace can be initialised
@@ -18,27 +25,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: app
-
-      # ── nrfutil ────────────────────────────────────────────────────────────
-      - name: Install nrfutil
-        run: |
-          curl -Lo nrfutil \
-            "https://files.nordicsemi.com/ui/api/v1/download?repoKey=swtools&path=external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil"
-          chmod +x nrfutil
-          sudo mv nrfutil /usr/local/bin/nrfutil
-          nrfutil install toolchain-manager
-
-      # ── Toolchain (arm-zephyr-eabi + CMake/Ninja/Python) ──────────────────
-      - name: Cache nRF Connect SDK toolchain
-        id: cache-toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/ncs/toolchains
-          key: ncs-toolchain-v2.9.2-${{ runner.os }}
-
-      - name: Install nRF Connect SDK toolchain v2.9.2
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
-        run: nrfutil toolchain-manager install --ncs-version v2.9.2
 
       # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 + …) ─────────────────
       - name: Cache west modules
@@ -59,18 +45,14 @@ jobs:
       - name: Initialise west workspace (nRF Connect SDK v2.9.2)
         if: steps.cache-west.outputs.cache-hit != 'true'
         run: |
-          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
-            west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.9.2
-          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
-            west update --narrow -o=--depth=1
+          west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.9.2
+          west update --narrow -o=--depth=1
 
       # ── Build ──────────────────────────────────────────────────────────────
       # CONFIG_BUILD_OUTPUT_UF2=y is already in app/prj.conf, so west build
       # produces build/zephyr/zephyr.uf2 automatically.
       - name: Build firmware (nrf52840dongle)
-        run: |
-          nrfutil toolchain-manager launch --ncs-version v2.9.2 -- \
-            west build -b nrf52840dongle/nrf52840 app/app --build-dir build
+        run: west build -b nrf52840dongle/nrf52840 app/app --build-dir build
 
       # ── Artifacts ──────────────────────────────────────────────────────────
       - name: Upload UF2 artifact
