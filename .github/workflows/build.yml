@@ -5,7 +5,6 @@ name: Build UF2
 
 on:
   push:
-  pull_request:
 
 jobs:
   build:
