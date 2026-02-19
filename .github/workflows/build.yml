@@ -1,0 +1,56 @@
+name: Build UF2
+
+# Build UF2 firmware on every push.
+# On version tags (v*) the UF2 is also attached to a GitHub Release.
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
+    defaults:
+      run:
+        shell: bash  # required — toolchain env vars are only set in bash sessions
+
+    steps:
+      # Repo is checked out into app/ ; the west SDK workspace lives in sdk/
+      # so the two trees stay cleanly separated.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 add-on + …) ──────────
+      # ncs-zigbee v1.2.1 is the manifest; it imports sdk-nrf v2.9.2 and
+      # adds the ncs-zigbee module itself (defines CONFIG_ZIGBEE_ADD_ON).
+      # Everything is initialised into sdk/ so the cache is a single path.
+      - name: Cache west modules
+        id: cache-west
+        uses: actions/cache@v4
+        with:
+          path: sdk
+          key: west-modules-ncs-zigbee-v1.2.1
+
+      - name: Initialise west workspace (ncs-zigbee v1.2.1 / NCS v2.9.2)
+        if: steps.cache-west.outputs.cache-hit != 'true'
+        run: |
+          west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
+          cd sdk && west update --narrow -o=--depth=1
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf, so west build
+      # produces build/app/zephyr/zephyr.uf2 automatically (sysbuild layout).
+      # west is run from sdk/ so it finds .west/ ; paths are relative to it.
+      - name: Build firmware (nrf52840dongle)
+        run: cd sdk && west build -b nrf52840dongle/nrf52840 ../app/app --build-dir ../build
+
+      # ── Artifacts ──────────────────────────────────────────────────────────
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frostbee-${{ github.sha }}
+          path: build/app/zephyr/zephyr.uf2
+          if-no-files-found: error
