@@ -16,8 +16,8 @@ jobs:
         shell: bash  # required — toolchain env vars are only set in bash sessions
 
     steps:
-      # Check out into app/ so the west workspace can be initialised
-      # in the workspace root alongside the SDK module directories.
+      # Repo is checked out into app/ ; the west SDK workspace lives in sdk/
+      # so the two trees stay cleanly separated.
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -26,33 +26,26 @@ jobs:
       # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 add-on + …) ──────────
       # ncs-zigbee v1.2.1 is the manifest; it imports sdk-nrf v2.9.2 and
       # adds the ncs-zigbee module itself (defines CONFIG_ZIGBEE_ADD_ON).
+      # Everything is initialised into sdk/ so the cache is a single path.
       - name: Cache west modules
         id: cache-west
         uses: actions/cache@v4
         with:
-          path: |
-            .west
-            bootloader
-            mbedtls
-            modules
-            ncs-zigbee
-            nrf
-            nrfxlib
-            tools
-            zephyr
+          path: sdk
           key: west-modules-ncs-zigbee-v1.2.1
 
       - name: Initialise west workspace (ncs-zigbee v1.2.1 / NCS v2.9.2)
         if: steps.cache-west.outputs.cache-hit != 'true'
         run: |
-          west init -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
-          west update --narrow -o=--depth=1
+          west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
+          cd sdk && west update --narrow -o=--depth=1
 
       # ── Build ──────────────────────────────────────────────────────────────
-      # CONFIG_BUILD_OUTPUT_UF2=y is already in app/prj.conf, so west build
-      # produces build/zephyr/zephyr.uf2 automatically.
+      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf, so west build
+      # produces build/app/zephyr/zephyr.uf2 automatically (sysbuild layout).
+      # west is run from sdk/ so it finds .west/ ; paths are relative to it.
       - name: Build firmware (nrf52840dongle)
-        run: west build -b nrf52840dongle/nrf52840 app/app --build-dir build
+        run: cd sdk && west build -b nrf52840dongle/nrf52840 ../app/app --build-dir ../build
 
       # ── Artifacts ──────────────────────────────────────────────────────────
       - name: Upload UF2 artifact
@@ -61,9 +54,3 @@ jobs:
           name: frostbee-${{ github.sha }}
           path: build/app/zephyr/zephyr.uf2
           if-no-files-found: error
-
-      - name: Attach UF2 to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/app/zephyr/zephyr.uf2
