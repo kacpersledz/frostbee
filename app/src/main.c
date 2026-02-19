@@ -529,8 +529,8 @@ static uint8_t read_battery_voltage(void)
 	/* Actual battery voltage (voltage divider is 1:2, so multiply by 2) */
 	int32_t battery_mv = adc_mv * VDIV_FACTOR;
 
-	/* Convert to ZCL format: units of 100mV */
-	uint8_t battery_zcl = (uint8_t)(battery_mv / 100);
+	/* Convert to ZCL format: units of 100mV (round to nearest, not truncate) */
+	uint8_t battery_zcl = (uint8_t)((battery_mv + 50) / 100);
 
 	/* Calculate battery percentage (linear approximation for 3× AA batteries):
 	 * 4.5V (fresh) = 100%, 3.0V (depleted) = 0%
