@@ -23,11 +23,16 @@ name: Build & Release
 # Push a version tag to trigger a release:
 #   git tag v1.2.3 && git push origin v1.2.3
 #
-# ── Z2M OTA integration ──────────────────────────────────────────────────────
-# Download frostbee-vX.Y.Z.zigbee from the GitHub Release and place it in
-# your Zigbee2MQTT data directory under ota/:
-#   /config/zigbee2mqtt/data/ota/frostbee-v1.2.3.zigbee
-# Z2M will automatically offer it to matching devices on the next OTA check.
+# ── Z2M fully-automatic OTA ──────────────────────────────────────────────────
+# Add to your Zigbee2MQTT configuration.yaml (one-time):
+#
+#   ota:
+#     index_override: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+#     update_check_interval: 1440   # check daily (minutes); 0 = only on Z2M restart
+#
+# After that: push a version tag → GitHub Release is created with frostbee.zigbee
+# → Z2M downloads it on the next check → offers OTA to matching devices.
+# No manual file copying needed.
 
 on:
   push:
@@ -117,6 +122,10 @@ jobs:
             -- $EXTRA_ARGS
 
       # ── Create Zigbee OTA file ─────────────────────────────────────────────
+      # Two outputs:
+      #   frostbee-vX.Y.Z.zigbee  – versioned, for reference / manual use
+      #   frostbee.zigbee          – fixed name; GitHub /releases/latest/download/
+      #                              always serves this → ota_index.json never changes
       - name: Create Zigbee OTA file
         run: |
           python3 app/scripts/create_ota.py \
@@ -125,6 +134,7 @@ jobs:
             --manufacturer-id 0x1234 \
             --image-type      0x0001 \
             --file-version    "${{ steps.ver.outputs.file_ver }}"
+          cp "${{ steps.ver.outputs.artifact }}" frostbee.zigbee
 
       # ── Upload artifacts ───────────────────────────────────────────────────
       - name: Upload build artifacts
@@ -141,16 +151,19 @@ jobs:
         if: steps.ver.outputs.is_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.ver.outputs.artifact }}
+          files: |
+            ${{ steps.ver.outputs.artifact }}
+            frostbee.zigbee
           generate_release_notes: true
           body: |
-            ## Zigbee OTA
+            ## Zigbee OTA — automatic update
 
-            Place `${{ steps.ver.outputs.artifact }}` in your Z2M OTA directory:
+            Z2M will pick this up automatically if configured with:
+            ```yaml
+            ota:
+              index_override: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+              update_check_interval: 1440
             ```
-            /config/zigbee2mqtt/data/ota/${{ steps.ver.outputs.artifact }}
-            ```
-            Z2M will automatically offer it to Frostbee devices on the next OTA check.
 
             **MCUboot image version:** `${{ steps.ver.outputs.img_ver }}`
             **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`
