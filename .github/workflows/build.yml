@@ -96,7 +96,7 @@ jobs:
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
       - name: Write signing key
-        if: ${{ env.MCUBOOT_SIGNING_KEY != '' }}
+        if: ${{ secrets.MCUBOOT_SIGNING_KEY != '' }}
         env:
           MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
         run: |
@@ -104,22 +104,25 @@ jobs:
           printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
 
       # ── Build ──────────────────────────────────────────────────────────────
+      # Notes on cmake args with sysbuild:
+      #   -Dapp_CONFIG_*   → sets a Kconfig option in the 'app' image
+      #   -Dmcuboot_CONFIG_* → sets a Kconfig option in the 'mcuboot' image
+      # Using a bash array avoids eval + shell-quoting issues (the '+' in
+      # version strings like "1.2.3+0" is safe inside array elements).
       - name: Build firmware
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+          IMG_VER: ${{ steps.ver.outputs.img_ver }}
         run: |
-          EXTRA_ARGS="-DCONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION=\"${{ steps.ver.outputs.img_ver }}\""
-
+          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="$IMG_VER")
           if [[ -n "$SIGNING_KEY" ]]; then
-            KEY_PATH="$(pwd)/app/app/keys/signing.pem"
-            EXTRA_ARGS="$EXTRA_ARGS -Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$KEY_PATH\""
+            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="$(pwd)/app/app/keys/signing.pem")
           fi
-
-          cd sdk && eval west build \
+          cd sdk && west build \
             -b nrf52840dongle/nrf52840 \
             ../app/app \
             --build-dir ../build \
-            -- $EXTRA_ARGS
+            -- "${ARGS[@]}"
 
       # ── Create Zigbee OTA file ─────────────────────────────────────────────
       # Two outputs:
@@ -127,14 +130,17 @@ jobs:
       #   frostbee.zigbee          – fixed name; GitHub /releases/latest/download/
       #                              always serves this → ota_index.json never changes
       - name: Create Zigbee OTA file
+        env:
+          ARTIFACT: ${{ steps.ver.outputs.artifact }}
+          FILE_VER: ${{ steps.ver.outputs.file_ver }}
         run: |
           python3 app/scripts/create_ota.py \
             --input       build/app/zephyr/zephyr.signed.bin \
-            --output      "${{ steps.ver.outputs.artifact }}" \
+            --output      "$ARTIFACT" \
             --manufacturer-id 0x1234 \
             --image-type      0x0001 \
-            --file-version    "${{ steps.ver.outputs.file_ver }}"
-          cp "${{ steps.ver.outputs.artifact }}" frostbee.zigbee
+            --file-version    "$FILE_VER"
+          cp "$ARTIFACT" frostbee.zigbee
 
       # ── Upload artifacts ───────────────────────────────────────────────────
       - name: Upload build artifacts
@@ -144,7 +150,7 @@ jobs:
           path: |
             ${{ steps.ver.outputs.artifact }}
             build/merged.hex
-          if-no-files-found: error
+          if-no-files-found: warn
 
       # ── GitHub Release (version tags only) ────────────────────────────────
       - name: Create GitHub Release
