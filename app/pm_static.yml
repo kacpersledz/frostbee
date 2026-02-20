@@ -5,23 +5,32 @@
 # Flash map (1 MB):
 #   0x000000 - 0x001000  MBR              (  4 KB)  -- managed by hardware
 #   0x001000 - 0x00d000  MCUboot          ( 48 KB)  -- OTA-capable bootloader
-#   0x00d000 - 0x06c000  Primary slot     (380 KB)  -- running image
-#   0x06c000 - 0x0cb000  Secondary slot   (380 KB)  -- OTA staging area
-#   0x0cb000 - 0x0cc000  (unused gap)     (  4 KB)
-#   0x0cc000 - 0x0d4000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
-#   0x0d4000 - 0x0d8000  ZBOSS product cfg( 16 KB)  -- Zigbee product config
-#   0x0d8000 - 0x100000  (unused)         (160 KB)  -- previously UF2 bootloader
+#   0x00d000 - 0x080000  Primary slot     (460 KB)  -- running image
+#   0x080000 - 0x0f3000  Secondary slot   (460 KB)  -- OTA staging area
+#   0x0f3000 - 0x0fb000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
+#   0x0fb000 - 0x0ff000  ZBOSS product cfg( 16 KB)  -- Zigbee product config
+#   0x0ff000 - 0x100000  (unused)         (  4 KB)
 #
-# NOTE: ZBOSS NVRAM is kept at the same address as before (0xcc000) so that
-# Zigbee network credentials survive the one-time migration to MCUboot.
-# Both OTA slots are 0x5F000 (380 KB) each -- sufficient for the firmware binary.
+# Slot sizing rationale:
+#   Current firmware binary: ~342 KB (from 685 KB UF2 file, each block = 256 B data)
+#   zigbee_fota + img_manager add ~50 KB -> ~392 KB total
+#   460 KB slots give ~68 KB headroom for future growth.
 #
-# To build and flash initially:
-#   west build -b nrf52840dongle/nrf52840 app
-#   nrfutil device program --firmware build/merged.hex   (via J-Link / nrfutil)
-#   -- OR --
-#   Convert build/merged.hex to UF2 and drag-drop via factory UF2 bootloader.
-# After that, all updates go over Zigbee OTA (Z2M / ZHA).
+# NOTE: ZBOSS NVRAM moves from 0xcc000 to 0xf3000 vs. the old UF2-bootloader layout.
+# The device will need to re-join the Zigbee network after the first flash.
+#
+# IMPORTANT - UF2 drag-and-drop after first MCUboot install:
+#   Switching to MCUboot updates UICR.NRFFW[0] to point to MCUboot (0x1000).
+#   The factory UF2 bootloader at 0xd8000 is still in flash but no longer
+#   invoked on double-tap reset. Future updates go via Zigbee OTA only.
+#   Emergency recovery: use a J-Link programmer or enable MCUboot USB-serial DFU
+#   (CONFIG_MCUBOOT_SERIAL=y in child_image/mcuboot.conf).
+#
+# Initial installation (one-time, from factory firmware):
+#   Double-tap reset to enter factory UF2 bootloader, then:
+#     nrfutil dfu usb-serial -pkg build/dfu_mcuboot.zip -p /dev/ttyACM0
+#   OR drag merged.uf2 via the factory USB mass-storage interface.
+#   After this, all updates are via Zigbee OTA (Z2M / ZHA).
 
 mcuboot:
   address: 0x1000
@@ -31,19 +40,19 @@ mcuboot:
 
 mcuboot_primary:
   address: 0xd000
-  end_address: 0x6c000
+  end_address: 0x80000
   region: flash_primary
-  size: 0x5f000
+  size: 0x73000
 
 mcuboot_secondary:
-  address: 0x6c000
-  end_address: 0xcb000
+  address: 0x80000
+  end_address: 0xf3000
   region: flash_primary
-  size: 0x5f000
+  size: 0x73000
 
 zboss_nvram:
-  address: 0xcc000
-  end_address: 0xd4000
+  address: 0xf3000
+  end_address: 0xfb000
   region: flash_primary
   size: 0x8000
   placement:
@@ -51,8 +60,8 @@ zboss_nvram:
       - zboss_product_config
 
 zboss_product_config:
-  address: 0xd4000
-  end_address: 0xd8000
+  address: 0xfb000
+  end_address: 0xff000
   region: flash_primary
   size: 0x4000
   placement:
