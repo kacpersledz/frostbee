@@ -3,7 +3,7 @@ name: Build
 # Build on every branch push and produce dev artifacts.
 #
 # Version scheme for dev builds:
-#   commit count N  →  image_version="0.0.N+0"  file_version=0x000000NN
+#   short SHA  →  image_version="0.0.0+0"  file_version=0xSHASHASH
 #
 # For release builds triggered by version tags see release.yml.
 
@@ -26,7 +26,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: app
-          fetch-depth: 0   # needed for commit count
 
       - name: Cache west modules
         id: cache-west
@@ -44,14 +43,14 @@ jobs:
       - name: Compute version
         id: ver
         run: |
-          N=$(git -C app rev-list --count HEAD)
-          IMG_VER="0.0.${N}+0"
-          FILE_VER=$(printf "0x%08x" "$N")
-          ARTIFACT="frostbee-dev-${GITHUB_SHA::8}.zigbee"
+          SHORT="${GITHUB_SHA::8}"
+          IMG_VER="0.0.0+0"
+          FILE_VER="0x${SHORT}"
+          ARTIFACT="frostbee-dev-${SHORT}.zigbee"
           echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
           echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
-          echo "Version: img=$IMG_VER  file=$FILE_VER"
+          echo "Version: img=$IMG_VER  file=$FILE_VER  sha=$SHORT"
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
