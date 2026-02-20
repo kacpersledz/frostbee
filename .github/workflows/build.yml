@@ -1,7 +1,33 @@
-name: Build UF2
+name: Build & Release
 
-# Build UF2 firmware on every push.
-# On version tags (v*) the UF2 is also attached to a GitHub Release.
+# Build on every push.
+# On version tags (v*.*.*) also:
+#   - sign with the production key (MCUBOOT_SIGNING_KEY secret)
+#   - create a Zigbee OTA file (.zigbee)
+#   - publish a GitHub Release with the OTA file attached
+#
+# ── One-time setup ──────────────────────────────────────────────────────────
+# 1. Generate a signing key (keep the .pem secret, never commit it):
+#      python3 $ZEPHYR_BASE/../bootloader/mcuboot/scripts/imgtool.py \
+#        keygen -k frostbee_signing.pem -t ecdsa-p256
+#
+# 2. Add the private key to GitHub Secrets:
+#      Settings → Secrets → Actions → New repository secret
+#      Name:  MCUBOOT_SIGNING_KEY
+#      Value: (paste the full contents of frostbee_signing.pem)
+#
+# 3. Set CONFIG_ZIGBEE_FOTA_MANUFACTURER_ID and CONFIG_ZIGBEE_FOTA_IMAGE_TYPE
+#    in app/prj.conf to values that match your Z2M external converter.
+#
+# ── Release workflow ─────────────────────────────────────────────────────────
+# Push a version tag to trigger a release:
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# ── Z2M OTA integration ──────────────────────────────────────────────────────
+# Download frostbee-vX.Y.Z.zigbee from the GitHub Release and place it in
+# your Zigbee2MQTT data directory under ota/:
+#   /config/zigbee2mqtt/data/ota/frostbee-v1.2.3.zigbee
+# Z2M will automatically offer it to matching devices on the next OTA check.
 
 on:
   push:
@@ -13,20 +39,15 @@ jobs:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
     defaults:
       run:
-        shell: bash  # required — toolchain env vars are only set in bash sessions
+        shell: bash
 
     steps:
-      # Repo is checked out into app/ ; the west SDK workspace lives in sdk/
-      # so the two trees stay cleanly separated.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           path: app
+          fetch-depth: 0   # needed for git describe / tag parsing
 
-      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 add-on + …) ──────────
-      # ncs-zigbee v1.2.1 is the manifest; it imports sdk-nrf v2.9.2 and
-      # adds the ncs-zigbee module itself (defines CONFIG_ZIGBEE_ADD_ON).
-      # Everything is initialised into sdk/ so the cache is a single path.
       - name: Cache west modules
         id: cache-west
         uses: actions/cache@v4
@@ -40,17 +61,96 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      # ── Build ──────────────────────────────────────────────────────────────
-      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf, so west build
-      # produces build/app/zephyr/zephyr.uf2 automatically (sysbuild layout).
-      # west is run from sdk/ so it finds .west/ ; paths are relative to it.
-      - name: Build firmware (nrf52840dongle)
-        run: cd sdk && west build -b nrf52840dongle/nrf52840 ../app/app --build-dir ../build
+      # ── Version ────────────────────────────────────────────────────────────
+      # v1.2.3  →  image_version="1.2.3+0"  file_version=0x01020300
+      # non-tag →  image_version="0.0.N+0"  file_version=0x000000NN  (N=commit count)
+      - name: Compute version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
+            IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
+            IMG_VER="${MAJOR}.${MINOR}.${PATCH}+0"
+            FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
+            ARTIFACT="frostbee-${TAG}.zigbee"
+            IS_RELEASE=true
+          else
+            N=$(git -C app rev-list --count HEAD)
+            IMG_VER="0.0.${N}+0"
+            FILE_VER=$(printf "0x%08x" "$N")
+            ARTIFACT="frostbee-dev-${GITHUB_SHA::8}.zigbee"
+            IS_RELEASE=false
+          fi
+          echo "img_ver=$IMG_VER"     >> "$GITHUB_OUTPUT"
+          echo "file_ver=$FILE_VER"   >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT"   >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Version: img=$IMG_VER  file=$FILE_VER  release=$IS_RELEASE"
 
-      # ── Artifacts ──────────────────────────────────────────────────────────
-      - name: Upload UF2 artifact
+      # ── Signing key ────────────────────────────────────────────────────────
+      # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
+      # default development key is used (fine for testing, not for production).
+      - name: Write signing key
+        if: ${{ env.MCUBOOT_SIGNING_KEY != '' }}
+        env:
+          MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+        run: |
+          mkdir -p app/app/keys
+          printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      - name: Build firmware
+        env:
+          SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+        run: |
+          EXTRA_ARGS="-DCONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION=\"${{ steps.ver.outputs.img_ver }}\""
+
+          if [[ -n "$SIGNING_KEY" ]]; then
+            KEY_PATH="$(pwd)/app/app/keys/signing.pem"
+            EXTRA_ARGS="$EXTRA_ARGS -Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$KEY_PATH\""
+          fi
+
+          cd sdk && eval west build \
+            -b nrf52840dongle/nrf52840 \
+            ../app/app \
+            --build-dir ../build \
+            -- $EXTRA_ARGS
+
+      # ── Create Zigbee OTA file ─────────────────────────────────────────────
+      - name: Create Zigbee OTA file
+        run: |
+          python3 app/scripts/create_ota.py \
+            --input       build/app/zephyr/zephyr.signed.bin \
+            --output      "${{ steps.ver.outputs.artifact }}" \
+            --manufacturer-id 0x1234 \
+            --image-type      0x0001 \
+            --file-version    "${{ steps.ver.outputs.file_ver }}"
+
+      # ── Upload artifacts ───────────────────────────────────────────────────
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: frostbee-${{ github.sha }}
-          path: build/app/zephyr/zephyr.uf2
+          path: |
+            ${{ steps.ver.outputs.artifact }}
+            build/merged.hex
           if-no-files-found: error
+
+      # ── GitHub Release (version tags only) ────────────────────────────────
+      - name: Create GitHub Release
+        if: steps.ver.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.ver.outputs.artifact }}
+          generate_release_notes: true
+          body: |
+            ## Zigbee OTA
+
+            Place `${{ steps.ver.outputs.artifact }}` in your Z2M OTA directory:
+            ```
+            /config/zigbee2mqtt/data/ota/${{ steps.ver.outputs.artifact }}
+            ```
+            Z2M will automatically offer it to Frostbee devices on the next OTA check.
+
+            **MCUboot image version:** `${{ steps.ver.outputs.img_ver }}`
+            **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`
