@@ -74,8 +74,8 @@ HDR_LEN=56            # Fixed header size (no optional fields)
 
 # ── Helper: write little-endian bytes ──
 # Usage: le16 VALUE, le32 VALUE
-le16() { printf '\\x%02x\\x%02x' $(($1 & 0xFF)) $((($1 >> 8) & 0xFF)); }
-le32() { printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(($1 & 0xFF)) $((($1 >> 8) & 0xFF)) $((($1 >> 16) & 0xFF)) $((($1 >> 24) & 0xFF)); }
+le16() { printf '%b' "$(printf '\\x%02x\\x%02x' $(($1 & 0xFF)) $((($1 >> 8) & 0xFF)))"; }
+le32() { printf '%b' "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(($1 & 0xFF)) $((($1 >> 8) & 0xFF)) $((($1 >> 16) & 0xFF)) $((($1 >> 24) & 0xFF)))"; }
 
 # ── Build the file ──
 PAYLOAD_SIZE=$(stat -c%s "$INPUT")
@@ -83,7 +83,7 @@ SUBELEMENT_OVERHEAD=6  # tag (2) + length (4)
 TOTAL_SIZE=$((HDR_LEN + SUBELEMENT_OVERHEAD + PAYLOAD_SIZE))
 
 # Pad/truncate header string to exactly 32 bytes
-HDR_STR_HEX=$(printf '%-32s' "$HEADER_STRING" | head -c 32 | xxd -p)
+HDR_STR_HEX=$(printf '%-32s' "$HEADER_STRING" | head -c 32 | od -A n -t x1 | tr -d ' \n')
 
 {
     # Header (56 bytes, all little-endian)
