@@ -83,7 +83,7 @@ SUBELEMENT_OVERHEAD=6  # tag (2) + length (4)
 TOTAL_SIZE=$((HDR_LEN + SUBELEMENT_OVERHEAD + PAYLOAD_SIZE))
 
 # Pad/truncate header string to exactly 32 bytes
-HDR_STR_HEX=$(printf '%-32s' "$HEADER_STRING" | head -c 32 | xxd -p)
+HDR_STR_HEX=$(printf '%-32s' "$HEADER_STRING" | head -c 32 | od -A n -t x1 | tr -d ' \n')
 
 {
     # Header (56 bytes, all little-endian)
