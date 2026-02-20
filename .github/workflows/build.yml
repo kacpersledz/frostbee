@@ -115,7 +115,9 @@ jobs:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
           IMG_VER: ${{ steps.ver.outputs.img_ver }}
         run: |
-          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="$IMG_VER")
+          # Kconfig string values require surrounding quotes in the .conf file.
+          # Passing \"...\" makes cmake write: CONFIG_...="0.0.27+0" (valid).
+          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
           if [[ -n "$SIGNING_KEY" ]]; then
             ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="$(pwd)/app/app/keys/signing.pem")
           fi
