@@ -1,40 +1,16 @@
-name: Build & Release
+name: Build
 
-# Build on every push.
-# On version tags (v*.*.*) also:
-#   - sign with the production key (MCUBOOT_SIGNING_KEY secret)
-#   - create a Zigbee OTA file (.zigbee)
-#   - publish a GitHub Release with the OTA file attached
+# Build on every branch push and produce dev artifacts.
 #
-# ── One-time setup ──────────────────────────────────────────────────────────
-# 1. Generate a signing key (keep the .pem secret, never commit it):
-#      python3 $ZEPHYR_BASE/../bootloader/mcuboot/scripts/imgtool.py \
-#        keygen -k frostbee_signing.pem -t ecdsa-p256
+# Version scheme for dev builds:
+#   commit count N  →  image_version="0.0.N+0"  file_version=0x000000NN
 #
-# 2. Add the private key to GitHub Secrets:
-#      Settings → Secrets → Actions → New repository secret
-#      Name:  MCUBOOT_SIGNING_KEY
-#      Value: (paste the full contents of frostbee_signing.pem)
-#
-# 3. Set CONFIG_ZIGBEE_FOTA_MANUFACTURER_ID and CONFIG_ZIGBEE_FOTA_IMAGE_TYPE
-#    in app/prj.conf to values that match your Z2M external converter.
-#
-# ── Release workflow ─────────────────────────────────────────────────────────
-# Push a version tag to trigger a release:
-#   git tag v1.2.3 && git push origin v1.2.3
-#
-# ── Z2M fully-automatic OTA ──────────────────────────────────────────────────
-# Add to your Zigbee2MQTT configuration.yaml (one-time):
-#
-#   ota:
-#     zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
-#     update_check_interval: 1440   # check daily (minutes); 0 = only on Z2M restart
-#
-# After that: push a version tag → GitHub Release is created with frostbee.zigbee
-# → Z2M downloads it on the next check → offers OTA to matching devices.
+# For release builds triggered by version tags see release.yml.
 
 on:
   push:
+    branches:
+      - '**'
 
 jobs:
   build:
@@ -50,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: app
-          fetch-depth: 0   # needed for git describe / tag parsing
+          fetch-depth: 0   # needed for commit count
 
       - name: Cache west modules
         id: cache-west
@@ -65,33 +41,18 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      # ── Version ────────────────────────────────────────────────────────────
-      # v1.2.3  →  image_version="1.2.3+0"  file_version=0x01020300
-      # non-tag →  image_version="0.0.N+0"  file_version=0x000000NN  (N=commit count)
       - name: Compute version
         id: ver
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
-            IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
-            IMG_VER="${MAJOR}.${MINOR}.${PATCH}+0"
-            FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
-            ARTIFACT="frostbee-${TAG}.zigbee"
-            IS_RELEASE=true
-          else
-            N=$(git -C app rev-list --count HEAD)
-            IMG_VER="0.0.${N}+0"
-            FILE_VER=$(printf "0x%08x" "$N")
-            ARTIFACT="frostbee-dev-${GITHUB_SHA::8}.zigbee"
-            IS_RELEASE=false
-          fi
-          echo "img_ver=$IMG_VER"     >> "$GITHUB_OUTPUT"
-          echo "file_ver=$FILE_VER"   >> "$GITHUB_OUTPUT"
-          echo "artifact=$ARTIFACT"   >> "$GITHUB_OUTPUT"
-          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
-          echo "Version: img=$IMG_VER  file=$FILE_VER  release=$IS_RELEASE"
+          N=$(git -C app rev-list --count HEAD)
+          IMG_VER="0.0.${N}+0"
+          FILE_VER=$(printf "0x%08x" "$N")
+          ARTIFACT="frostbee-dev-${GITHUB_SHA::8}.zigbee"
+          echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
+          echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "Version: img=$IMG_VER  file=$FILE_VER"
 
-      # ── Signing key ────────────────────────────────────────────────────────
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
       - name: Write signing key
@@ -103,7 +64,6 @@ jobs:
             printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
           fi
 
-      # ── Build ──────────────────────────────────────────────────────────────
       - name: Build firmware
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
@@ -119,7 +79,6 @@ jobs:
             --build-dir ../build \
             -- "${ARGS[@]}"
 
-      # ── Create Zigbee OTA file ─────────────────────────────────────────────
       - name: Create Zigbee OTA file
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
@@ -131,9 +90,7 @@ jobs:
             --manufacturer-id 0x1234 \
             --image-type      0x0001 \
             --file-version    "$FILE_VER"
-          cp "$ARTIFACT" frostbee.zigbee
 
-      # ── Upload artifacts ───────────────────────────────────────────────────
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -142,25 +99,3 @@ jobs:
             ${{ steps.ver.outputs.artifact }}
             build/merged.hex
           if-no-files-found: warn
-
-      # ── GitHub Release (version tags only) ────────────────────────────────
-      - name: Create GitHub Release
-        if: steps.ver.outputs.is_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ steps.ver.outputs.artifact }}
-            frostbee.zigbee
-          generate_release_notes: true
-          body: |
-            ## Zigbee OTA — automatic update
-
-            Z2M will pick this up automatically if configured with:
-            ```yaml
-            ota:
-              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
-              update_check_interval: 1440
-            ```
-
-            **MCUboot image version:** `${{ steps.ver.outputs.img_ver }}`
-            **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`
