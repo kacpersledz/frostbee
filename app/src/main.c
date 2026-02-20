@@ -22,6 +22,7 @@
 #include <zboss_api_addons.h>
 #include <zigbee/zigbee_app_utils.h>
 #include <zigbee/zigbee_error_handler.h>
+#include <zigbee/zigbee_fota.h>
 #include <zb_nrf_platform.h>
 #include "zb_mem_config_custom.h"
 #include "zb_frostbee.h"
@@ -385,9 +386,13 @@ ZB_DECLARE_FROSTBEE_EP(
 	FROSTBEE_ENDPOINT,
 	frostbee_clusters);
 
-ZBOSS_DECLARE_DEVICE_CTX_1_EP(
+/* The zigbee_fota module registers its own OTA Upgrade endpoint (ep 33).
+ * Declare a 2-endpoint device context: sensor endpoint + FOTA endpoint.
+ */
+ZBOSS_DECLARE_DEVICE_CTX_2_EP(
 	frostbee_ctx,
-	frostbee_ep);
+	frostbee_ep,
+	zigbee_fota_upgrade_ep);
 
 /* ─── Attribute initialization ─── */
 
@@ -688,6 +693,29 @@ static void battery_periodic(zb_bufid_t bufid)
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
+/* ─── Zigbee FOTA ─── */
+
+static void fota_evt_handler(const struct zigbee_fota_evt *evt)
+{
+	switch (evt->id) {
+	case ZIGBEE_FOTA_EVT_PROGRESS:
+		LOG_INF("OTA progress: %d%%", evt->dl.progress);
+		break;
+
+	case ZIGBEE_FOTA_EVT_FINISHED:
+		LOG_INF("OTA download complete - rebooting into new firmware");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+
+	case ZIGBEE_FOTA_EVT_ERROR:
+		LOG_ERR("OTA update failed");
+		break;
+
+	default:
+		break;
+	}
+}
+
 /* ─── Zigbee signal handler ─── */
 
 void zboss_signal_handler(zb_bufid_t bufid)
@@ -741,7 +769,10 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		break;
 
 	default:
-		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+		/* Route to FOTA handler first - it handles OTA Upgrade signals
+		 * and delegates everything else to zigbee_default_signal_handler.
+		 */
+		zigbee_fota_signal_handler(bufid);
 		break;
 	}
 
@@ -814,6 +845,13 @@ int main(void)
 	/* Register device context and initialize attributes */
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
 	clusters_attr_init();
+
+	/* Initialize Zigbee FOTA module.
+	 * Registers the OTA Upgrade endpoint (ep 33) and sets up MCUboot image
+	 * management. The callback handles progress logging and reboot on finish.
+	 */
+	zigbee_fota_init(fota_evt_handler);
+	LOG_INF("Zigbee FOTA (OTA updates) ready");
 
 	/* Start Zigbee stack */
 	zigbee_enable();

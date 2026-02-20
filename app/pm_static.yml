@@ -1,19 +1,45 @@
 # Frostbee - Flash Partition Layout
 #
-# nRF52840 Dongle (PCA10059) with UF2 bootloader
-#
-# Includes ZBOSS NVRAM partitions for persistent Zigbee storage,
-# placed safely below the bootloader region.
+# nRF52840 Dongle (PCA10059) with MCUboot for Zigbee OTA updates.
 #
 # Flash map (1 MB):
 #   0x000000 - 0x001000  MBR              (  4 KB)  -- managed by hardware
-#   0x001000 - 0x0cc000  Application      (812 KB)
+#   0x001000 - 0x00d000  MCUboot          ( 48 KB)  -- OTA-capable bootloader
+#   0x00d000 - 0x06c000  Primary slot     (380 KB)  -- running image
+#   0x06c000 - 0x0cb000  Secondary slot   (380 KB)  -- OTA staging area
+#   0x0cb000 - 0x0cc000  (unused gap)     (  4 KB)
 #   0x0cc000 - 0x0d4000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
 #   0x0d4000 - 0x0d8000  ZBOSS product cfg( 16 KB)  -- Zigbee product config
-#   0x0d8000 - 0x100000  Bootloader       (160 KB)  -- DO NOT TOUCH
+#   0x0d8000 - 0x100000  (unused)         (160 KB)  -- previously UF2 bootloader
 #
-# NOTE: 'app' is placed automatically by partition manager in the
-# remaining gap (0x1000 - 0xcc000). Do NOT define it statically.
+# NOTE: ZBOSS NVRAM is kept at the same address as before (0xcc000) so that
+# Zigbee network credentials survive the one-time migration to MCUboot.
+# Both OTA slots are 0x5F000 (380 KB) each -- sufficient for the firmware binary.
+#
+# To build and flash initially:
+#   west build -b nrf52840dongle/nrf52840 app
+#   nrfutil device program --firmware build/merged.hex   (via J-Link / nrfutil)
+#   -- OR --
+#   Convert build/merged.hex to UF2 and drag-drop via factory UF2 bootloader.
+# After that, all updates go over Zigbee OTA (Z2M / ZHA).
+
+mcuboot:
+  address: 0x1000
+  end_address: 0xd000
+  region: flash_primary
+  size: 0xc000
+
+mcuboot_primary:
+  address: 0xd000
+  end_address: 0x6c000
+  region: flash_primary
+  size: 0x5f000
+
+mcuboot_secondary:
+  address: 0x6c000
+  end_address: 0xcb000
+  region: flash_primary
+  size: 0x5f000
 
 zboss_nvram:
   address: 0xcc000
@@ -30,11 +56,4 @@ zboss_product_config:
   region: flash_primary
   size: 0x4000
   placement:
-    before:
-      - bootloader_reserved
-
-bootloader_reserved:
-  address: 0xd8000
-  end_address: 0x100000
-  region: flash_primary
-  size: 0x28000
+    before: end
