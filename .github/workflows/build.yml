@@ -96,12 +96,13 @@ jobs:
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
       - name: Write signing key
-        if: ${{ secrets.MCUBOOT_SIGNING_KEY != '' }}
         env:
           MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
         run: |
-          mkdir -p app/app/keys
-          printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+          if [[ -n "$MCUBOOT_SIGNING_KEY" ]]; then
+            mkdir -p app/app/keys
+            printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+          fi
 
       # ── Build ──────────────────────────────────────────────────────────────
       # Notes on cmake args with sysbuild:
