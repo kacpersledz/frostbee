@@ -1,23 +1,39 @@
 # Frostbee - Flash Partition Layout
 #
-# nRF52840 Dongle (PCA10059) with UF2 bootloader
-#
-# Includes ZBOSS NVRAM partitions for persistent Zigbee storage,
-# placed safely below the bootloader region.
+# nRF52840 Dongle (PCA10059) with MCUboot for Zigbee OTA updates.
 #
 # Flash map (1 MB):
 #   0x000000 - 0x001000  MBR              (  4 KB)  -- managed by hardware
-#   0x001000 - 0x0cc000  Application      (812 KB)
-#   0x0cc000 - 0x0d4000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
-#   0x0d4000 - 0x0d8000  ZBOSS product cfg( 16 KB)  -- Zigbee product config
-#   0x0d8000 - 0x100000  Bootloader       (160 KB)  -- DO NOT TOUCH
+#   0x001000 - 0x011000  MCUboot          ( 64 KB)  -- OTA-capable bootloader
+#   0x011000 - 0x082000  Primary slot     (452 KB)  -- running image
+#   0x082000 - 0x0f3000  Secondary slot   (452 KB)  -- OTA staging area
+#   0x0f3000 - 0x0fb000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
+#   0x0fb000 - 0x100000  ZBOSS product cfg( 20 KB)  -- Zigbee product config
 #
-# NOTE: 'app' is placed automatically by partition manager in the
-# remaining gap (0x1000 - 0xcc000). Do NOT define it statically.
+# NOTE: ZBOSS NVRAM moves from 0xcc000 to 0xf3000 vs. the old UF2-bootloader
+# layout. The device will need to re-join the Zigbee network after first flash.
+
+mcuboot:
+  address: 0x1000
+  end_address: 0x11000
+  region: flash_primary
+  size: 0x10000
+
+mcuboot_primary:
+  address: 0x11000
+  end_address: 0x82000
+  region: flash_primary
+  size: 0x71000
+
+mcuboot_secondary:
+  address: 0x82000
+  end_address: 0xf3000
+  region: flash_primary
+  size: 0x71000
 
 zboss_nvram:
-  address: 0xcc000
-  end_address: 0xd4000
+  address: 0xf3000
+  end_address: 0xfb000
   region: flash_primary
   size: 0x8000
   placement:
@@ -25,16 +41,9 @@ zboss_nvram:
       - zboss_product_config
 
 zboss_product_config:
-  address: 0xd4000
-  end_address: 0xd8000
-  region: flash_primary
-  size: 0x4000
-  placement:
-    before:
-      - bootloader_reserved
-
-bootloader_reserved:
-  address: 0xd8000
+  address: 0xfb000
   end_address: 0x100000
   region: flash_primary
-  size: 0x28000
+  size: 0x5000
+  placement:
+    before: end

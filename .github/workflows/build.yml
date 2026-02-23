@@ -1,10 +1,17 @@
-name: Build UF2
+name: Build
 
-# Build UF2 firmware on every push.
-# On version tags (v*) the UF2 is also attached to a GitHub Release.
+# Build on every branch push and produce dev artifacts.
+#
+# Version scheme for dev builds:
+#   image_version="0.0.0+0"  file_version=0x00000000
+#   Dev builds are never OTA candidates; the artifact is for flashing directly.
+#
+# For release builds triggered by version tags see release.yml.
 
 on:
   push:
+    branches:
+      - '**'
 
 jobs:
   build:
@@ -13,20 +20,14 @@ jobs:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
     defaults:
       run:
-        shell: bash  # required — toolchain env vars are only set in bash sessions
+        shell: bash
 
     steps:
-      # Repo is checked out into app/ ; the west SDK workspace lives in sdk/
-      # so the two trees stay cleanly separated.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           path: app
 
-      # ── west workspace (Zephyr + nRF SDK + ZBOSS r23 add-on + …) ──────────
-      # ncs-zigbee v1.2.1 is the manifest; it imports sdk-nrf v2.9.2 and
-      # adds the ncs-zigbee module itself (defines CONFIG_ZIGBEE_ADD_ON).
-      # Everything is initialised into sdk/ so the cache is a single path.
       - name: Cache west modules
         id: cache-west
         uses: actions/cache@v4
@@ -40,17 +41,61 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      # ── Build ──────────────────────────────────────────────────────────────
-      # CONFIG_BUILD_OUTPUT_UF2=y is set in app/prj.conf, so west build
-      # produces build/app/zephyr/zephyr.uf2 automatically (sysbuild layout).
-      # west is run from sdk/ so it finds .west/ ; paths are relative to it.
-      - name: Build firmware (nrf52840dongle)
-        run: cd sdk && west build -b nrf52840dongle/nrf52840 ../app/app --build-dir ../build
+      - name: Compute version
+        id: ver
+        run: |
+          SHORT="${GITHUB_SHA::8}"
+          IMG_VER="0.0.0+0"
+          FILE_VER="0x00000000"
+          ARTIFACT="frostbee-dev-${SHORT}.zigbee"
+          echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
+          echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "Version: img=$IMG_VER  file=$FILE_VER  sha=$SHORT"
 
-      # ── Artifacts ──────────────────────────────────────────────────────────
-      - name: Upload UF2 artifact
+      # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
+      # default development key is used (fine for testing, not for production).
+      - name: Write signing key
+        env:
+          MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+        run: |
+          if [[ -n "$MCUBOOT_SIGNING_KEY" ]]; then
+            mkdir -p app/app/keys
+            printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+          fi
+
+      - name: Build firmware
+        env:
+          SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+          IMG_VER: ${{ steps.ver.outputs.img_ver }}
+        run: |
+          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
+          if [[ -n "$SIGNING_KEY" ]]; then
+            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="$(pwd)/app/app/keys/signing.pem")
+          fi
+          cd sdk && west build \
+            -b nrf52840dongle/nrf52840 \
+            ../app/app \
+            --build-dir ../build \
+            -- "${ARGS[@]}"
+
+      - name: Create Zigbee OTA file
+        env:
+          ARTIFACT: ${{ steps.ver.outputs.artifact }}
+          FILE_VER: ${{ steps.ver.outputs.file_ver }}
+        run: |
+          bash app/scripts/create_ota.sh \
+            --input       build/app/zephyr/zephyr.signed.bin \
+            --output      "$ARTIFACT" \
+            --manufacturer-id 0x1234 \
+            --image-type      0x0001 \
+            --file-version    "$FILE_VER"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: frostbee-${{ github.sha }}
-          path: build/app/zephyr/zephyr.uf2
-          if-no-files-found: error
+          path: |
+            ${{ steps.ver.outputs.artifact }}
+            build/merged.hex
+          if-no-files-found: warn

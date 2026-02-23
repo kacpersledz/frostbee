@@ -22,7 +22,13 @@
 #include <zboss_api_addons.h>
 #include <zigbee/zigbee_app_utils.h>
 #include <zigbee/zigbee_error_handler.h>
+#include <zigbee/zigbee_fota.h>
 #include <zb_nrf_platform.h>
+
+/* The zigbee_fota library declares this endpoint internally but doesn't
+ * export it in the header. We need it for ZBOSS_DECLARE_DEVICE_CTX_2_EP.
+ */
+extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
 #include "zb_mem_config_custom.h"
 #include "zb_frostbee.h"
 
@@ -385,9 +391,13 @@ ZB_DECLARE_FROSTBEE_EP(
 	FROSTBEE_ENDPOINT,
 	frostbee_clusters);
 
-ZBOSS_DECLARE_DEVICE_CTX_1_EP(
+/* The zigbee_fota module registers its own OTA Upgrade endpoint (ep 33).
+ * Declare a 2-endpoint device context: sensor endpoint + FOTA endpoint.
+ */
+ZBOSS_DECLARE_DEVICE_CTX_2_EP(
 	frostbee_ctx,
-	frostbee_ep);
+	frostbee_ep,
+	zigbee_fota_client_ep);
 
 /* ─── Attribute initialization ─── */
 
@@ -688,6 +698,29 @@ static void battery_periodic(zb_bufid_t bufid)
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
+/* ─── Zigbee FOTA ─── */
+
+static void fota_evt_handler(const struct zigbee_fota_evt *evt)
+{
+	switch (evt->id) {
+	case ZIGBEE_FOTA_EVT_PROGRESS:
+		LOG_INF("OTA progress: %d%%", evt->dl.progress);
+		break;
+
+	case ZIGBEE_FOTA_EVT_FINISHED:
+		LOG_INF("OTA download complete - rebooting into new firmware");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+
+	case ZIGBEE_FOTA_EVT_ERROR:
+		LOG_ERR("OTA update failed");
+		break;
+
+	default:
+		break;
+	}
+}
+
 /* ─── Zigbee signal handler ─── */
 
 void zboss_signal_handler(zb_bufid_t bufid)
@@ -698,6 +731,11 @@ void zboss_signal_handler(zb_bufid_t bufid)
 
 	/* Verbose signal tracing - only visible at LOG_LEVEL_DBG */
 	LOG_DBG("Zigbee signal: %d, status: %d", sig, status);
+
+	/* Let FOTA module handle OTA-related signals (it starts server
+	 * discovery on DEVICE_REBOOT / STEERING and ignores the rest).
+	 */
+	zigbee_fota_signal_handler(bufid);
 
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
@@ -814,6 +852,13 @@ int main(void)
 	/* Register device context and initialize attributes */
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
 	clusters_attr_init();
+
+	/* Initialize Zigbee FOTA module.
+	 * Registers the OTA Upgrade endpoint (ep 33) and sets up MCUboot image
+	 * management. The callback handles progress logging and reboot on finish.
+	 */
+	zigbee_fota_init(fota_evt_handler);
+	LOG_INF("Zigbee FOTA (OTA updates) ready");
 
 	/* Start Zigbee stack */
 	zigbee_enable();

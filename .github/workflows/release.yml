@@ -1,0 +1,147 @@
+name: Release
+
+# Triggered by version tags: git tag v1.2.3 && git push origin v1.2.3
+#
+# Builds firmware with the proper semver, creates a Zigbee OTA file, and
+# publishes a GitHub Release with both attached.
+#
+# ── One-time setup ──────────────────────────────────────────────────────────
+# 1. Generate a signing key (keep the .pem secret, never commit it):
+#      python3 $ZEPHYR_BASE/../bootloader/mcuboot/scripts/imgtool.py \
+#        keygen -k frostbee_signing.pem -t ecdsa-p256
+#
+# 2. Add the private key to GitHub Secrets:
+#      Settings → Secrets → Actions → New repository secret
+#      Name:  MCUBOOT_SIGNING_KEY
+#      Value: (paste the full contents of frostbee_signing.pem)
+#
+# 3. Set CONFIG_ZIGBEE_FOTA_MANUFACTURER_ID and CONFIG_ZIGBEE_FOTA_IMAGE_TYPE
+#    in app/prj.conf to values that match your Z2M external converter.
+#
+# ── Z2M fully-automatic OTA ──────────────────────────────────────────────────
+# Add to your Zigbee2MQTT configuration.yaml (one-time):
+#
+#   ota:
+#     zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+#     update_check_interval: 1440   # check daily (minutes); 0 = only on Z2M restart
+#
+# After that: push a version tag → GitHub Release is created with frostbee.zigbee
+# → Z2M downloads it on the next check → offers OTA to matching devices.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: app
+          fetch-depth: 0
+
+      - name: Cache west modules
+        id: cache-west
+        uses: actions/cache@v4
+        with:
+          path: sdk
+          key: west-modules-ncs-zigbee-v1.2.1
+
+      - name: Initialise west workspace (ncs-zigbee v1.2.1 / NCS v2.9.2)
+        if: steps.cache-west.outputs.cache-hit != 'true'
+        run: |
+          west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
+          cd sdk && west update --narrow -o=--depth=1
+
+      # v1.2.3  →  image_version="1.2.3+0"  file_version=0x01020300
+      - name: Compute version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
+          IMG_VER="${MAJOR}.${MINOR}.${PATCH}+0"
+          FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
+          ARTIFACT="frostbee-${TAG}.zigbee"
+          echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
+          echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "Version: img=$IMG_VER  file=$FILE_VER"
+
+      # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
+      # default development key is used (fine for testing, not for production).
+      - name: Write signing key
+        env:
+          MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+        run: |
+          if [[ -n "$MCUBOOT_SIGNING_KEY" ]]; then
+            mkdir -p app/app/keys
+            printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+          fi
+
+      - name: Build firmware
+        env:
+          SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+          IMG_VER: ${{ steps.ver.outputs.img_ver }}
+        run: |
+          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
+          if [[ -n "$SIGNING_KEY" ]]; then
+            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="$(pwd)/app/app/keys/signing.pem")
+          fi
+          cd sdk && west build \
+            -b nrf52840dongle/nrf52840 \
+            ../app/app \
+            --build-dir ../build \
+            -- "${ARGS[@]}"
+
+      - name: Create Zigbee OTA file
+        env:
+          ARTIFACT: ${{ steps.ver.outputs.artifact }}
+          FILE_VER: ${{ steps.ver.outputs.file_ver }}
+        run: |
+          bash app/scripts/create_ota.sh \
+            --input       build/app/zephyr/zephyr.signed.bin \
+            --output      "$ARTIFACT" \
+            --manufacturer-id 0x1234 \
+            --image-type      0x0001 \
+            --file-version    "$FILE_VER"
+          cp "$ARTIFACT" frostbee.zigbee
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frostbee-${{ github.sha }}
+          path: |
+            ${{ steps.ver.outputs.artifact }}
+            build/merged.hex
+          if-no-files-found: warn
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.ver.outputs.artifact }}
+            frostbee.zigbee
+          generate_release_notes: true
+          body: |
+            ## Zigbee OTA — automatic update
+
+            Z2M will pick this up automatically if configured with:
+            ```yaml
+            ota:
+              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+              update_check_interval: 1440
+            ```
+
+            **MCUboot image version:** `${{ steps.ver.outputs.img_ver }}`
+            **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`
