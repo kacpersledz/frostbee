@@ -3,7 +3,8 @@ name: Build
 # Build on every branch push and produce dev artifacts.
 #
 # Version scheme for dev builds:
-#   short SHA  →  image_version="0.0.0+0"  file_version=0xSHASHASH
+#   image_version="0.0.0+0"  file_version=0x00000000
+#   Dev builds are never OTA candidates; the artifact is for flashing directly.
 #
 # For release builds triggered by version tags see release.yml.
 
@@ -45,7 +46,7 @@ jobs:
         run: |
           SHORT="${GITHUB_SHA::8}"
           IMG_VER="0.0.0+0"
-          FILE_VER="0x${SHORT}"
+          FILE_VER="0x00000000"
           ARTIFACT="frostbee-dev-${SHORT}.zigbee"
           echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
           echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
