@@ -71,7 +71,7 @@ jobs:
         run: |
           ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
           if [[ -n "$SIGNING_KEY" ]]; then
-            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="$(pwd)/app/app/keys/signing.pem")
+            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
           fi
           cd sdk && west build \
             -b nrf52840dongle/nrf52840 \
