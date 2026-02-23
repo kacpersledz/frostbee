@@ -22,7 +22,7 @@ name: Release
 # Add to your Zigbee2MQTT configuration.yaml (one-time):
 #
 #   ota:
-#     zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+#     zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
 #     update_check_interval: 1440   # check daily (minutes); 0 = only on Z2M restart
 #
 # After that: push a version tag → GitHub Release is created with frostbee.zigbee
@@ -139,7 +139,7 @@ jobs:
             Z2M will pick this up automatically if configured with:
             ```yaml
             ota:
-              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/main/ota_index.json
+              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
               update_check_interval: 1440
             ```
 
