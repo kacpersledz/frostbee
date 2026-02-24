@@ -80,6 +80,52 @@ jobs:
           find build/ -name "*.hex" | sort
           echo "-----------------------"
 
+      - name: Inspect UICR in merged.hex
+        run: |
+          python3 - <<'EOF'
+          # nRF52840 UICR base: 0x10001000
+          # NRFFW[0] at offset 0x14 => 0x10001014  (points to bootloader)
+          # NRFFW[1] at offset 0x18 => 0x10001018  (MBR params)
+          UICR_BASE   = 0x10001000
+          NRFFW0_ADDR = 0x10001014
+
+          flash = {}
+          with open("build/merged.hex") as f:
+              ext = 0
+              for line in f:
+                  line = line.strip()
+                  if not line.startswith(":"):
+                      continue
+                  byte_count  = int(line[1:3],   16)
+                  address     = int(line[3:7],   16) + ext
+                  record_type = int(line[7:9],   16)
+                  if record_type == 4:          # Extended Linear Address
+                      ext = int(line[9:13], 16) << 16
+                  elif record_type == 0:        # Data
+                      for i in range(byte_count):
+                          flash[address + i] = int(line[9 + i*2 : 11 + i*2], 16)
+
+          uicr_bytes = [a for a in flash if UICR_BASE <= a < UICR_BASE + 0x1000]
+          if not uicr_bytes:
+              print("UICR: NOT present in merged.hex")
+              print("  => UICR.NRFFW[0] unchanged after flash (still points to Nordic UF2 bootloader at 0xE0000)")
+          else:
+              print(f"UICR: present ({len(uicr_bytes)} bytes written)")
+              if NRFFW0_ADDR in flash:
+                  val = sum(flash.get(NRFFW0_ADDR + i, 0xFF) << (8*i) for i in range(4))
+                  print(f"  UICR.NRFFW[0] = 0x{val:08X}", end="  ")
+                  if val == 0xFFFFFFFF:
+                      print("(erased/not set)")
+                  elif val == 0x0E0000:
+                      print("=> Nordic UF2 bootloader (RISK: OTA will brick device)")
+                  elif val == 0x001000:
+                      print("=> MCUboot (safe: OTA will NOT brick device)")
+                  else:
+                      print(f"=> unknown target")
+              else:
+                  print("  UICR.NRFFW[0] = not written (0xFF default)")
+          EOF
+
       - name: Create Zigbee OTA file
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
