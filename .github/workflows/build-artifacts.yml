@@ -92,7 +92,7 @@ jobs:
             --manufacturer-id 0x1234 \
             --image-type      0x0001 \
             --file-version    "$FILE_VER"
-          cp build/zephyr/zephyr.uf2 "$UF2_ARTIFACT"
+          cp build/app/zephyr/zephyr.uf2 "$UF2_ARTIFACT"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
