@@ -1,13 +1,10 @@
 name: Build Artifacts
 
-# Manual trigger: Actions → Build Artifacts → Run workflow
-#
-# Builds the firmware and uploads all artifacts (merged.hex, .zigbee OTA,
-# .uf2) so you can verify paths and test the full build pipeline without
-# creating a release.
+# Temporary: runs on every push to verify UF2 paths before merging
+# into the release workflow. Will be removed afterwards.
 
 on:
-  workflow_dispatch:
+  push:
 
 jobs:
   build:
