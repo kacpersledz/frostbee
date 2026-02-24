@@ -73,9 +73,11 @@ jobs:
           IMG_VER="${MAJOR}.${MINOR}.${PATCH}+0"
           FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
           ARTIFACT="frostbee-${TAG}.zigbee"
-          echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
-          echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
-          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          UF2_ARTIFACT="frostbee-${TAG}.uf2"
+          echo "img_ver=$IMG_VER"         >> "$GITHUB_OUTPUT"
+          echo "file_ver=$FILE_VER"       >> "$GITHUB_OUTPUT"
+          echo "artifact=$ARTIFACT"       >> "$GITHUB_OUTPUT"
+          echo "uf2_artifact=$UF2_ARTIFACT" >> "$GITHUB_OUTPUT"
           echo "Version: img=$IMG_VER  file=$FILE_VER"
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
@@ -107,6 +109,7 @@ jobs:
       - name: Create Zigbee OTA file
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
+          UF2_ARTIFACT: ${{ steps.ver.outputs.uf2_artifact }}
           FILE_VER: ${{ steps.ver.outputs.file_ver }}
         run: |
           bash app/scripts/create_ota.sh \
@@ -116,6 +119,7 @@ jobs:
             --image-type      0x0001 \
             --file-version    "$FILE_VER"
           cp "$ARTIFACT" frostbee.zigbee
+          cp build/zephyr/zephyr.uf2 "$UF2_ARTIFACT"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -123,6 +127,7 @@ jobs:
           name: frostbee-${{ github.sha }}
           path: |
             ${{ steps.ver.outputs.artifact }}
+            ${{ steps.ver.outputs.uf2_artifact }}
             build/merged.hex
           if-no-files-found: warn
 
@@ -132,6 +137,7 @@ jobs:
           files: |
             ${{ steps.ver.outputs.artifact }}
             frostbee.zigbee
+            ${{ steps.ver.outputs.uf2_artifact }}
           generate_release_notes: true
           body: |
             ## Zigbee OTA — automatic update
