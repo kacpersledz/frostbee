@@ -17,6 +17,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
 #include <ram_pwrdn.h>
+#include <zephyr/dfu/mcuboot.h>
 
 #include <zboss_api.h>
 #include <zboss_api_addons.h>
@@ -859,6 +860,11 @@ int main(void)
 	 */
 	zigbee_fota_init(fota_evt_handler);
 	LOG_INF("Zigbee FOTA (OTA updates) ready");
+
+	/* Confirm the running image so MCUboot does not revert it on next boot.
+	 * Must be called after successful hardware init and before the main loop.
+	 */
+	boot_write_img_confirmed();
 
 	/* Start Zigbee stack */
 	zigbee_enable();

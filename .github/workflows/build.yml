@@ -90,6 +90,11 @@ jobs:
             --manufacturer-id 0x1234 \
             --image-type      0x0001 \
             --file-version    "$FILE_VER"
+          python3 sdk/zephyr/scripts/build/uf2conv.py \
+            build/merged.hex \
+            --family 0xADA52840 \
+            --convert \
+            --output frostbee-dev-${{ github.sha }}.uf2
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -97,5 +102,6 @@ jobs:
           name: frostbee-${{ github.sha }}
           path: |
             ${{ steps.ver.outputs.artifact }}
+            frostbee-dev-${{ github.sha }}.uf2
             build/merged.hex
           if-no-files-found: warn
