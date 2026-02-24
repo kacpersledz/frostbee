@@ -5,13 +5,16 @@
 # Flash map (1 MB):
 #   0x000000 - 0x001000  MBR              (  4 KB)  -- managed by hardware
 #   0x001000 - 0x011000  MCUboot          ( 64 KB)  -- OTA-capable bootloader
-#   0x011000 - 0x082000  Primary slot     (452 KB)  -- running image
-#   0x082000 - 0x0f3000  Secondary slot   (452 KB)  -- OTA staging area
-#   0x0f3000 - 0x0fb000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
-#   0x0fb000 - 0x100000  ZBOSS product cfg( 20 KB)  -- Zigbee product config
+#   0x011000 - 0x072000  Primary slot     (388 KB)  -- running image
+#   0x072000 - 0x0d3000  Secondary slot   (388 KB)  -- OTA staging area
+#   0x0d3000 - 0x0db000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
+#   0x0db000 - 0x0e0000  ZBOSS product cfg( 20 KB)  -- Zigbee product config
+#   0x0e0000 - 0x100000  Nordic UF2 bootloader (preserved, 128 KB)
 #
-# NOTE: ZBOSS NVRAM moves from 0xcc000 to 0xf3000 vs. the old UF2-bootloader
-# layout. The device will need to re-join the Zigbee network after first flash.
+# Slots are 388 KB each; current app image is ~350 KB (38 KB headroom).
+# UICR.NRFFW[0] is not touched -- MBR boots Nordic bootloader which
+# then boots MCUboot as the "application". OTA updates stay within the
+# secondary slot and never reach the Nordic bootloader area.
 
 mcuboot:
   address: 0x1000
@@ -21,19 +24,19 @@ mcuboot:
 
 mcuboot_primary:
   address: 0x11000
-  end_address: 0x82000
+  end_address: 0x72000
   region: flash_primary
-  size: 0x71000
+  size: 0x61000
 
 mcuboot_secondary:
-  address: 0x82000
-  end_address: 0xf3000
+  address: 0x72000
+  end_address: 0xd3000
   region: flash_primary
-  size: 0x71000
+  size: 0x61000
 
 zboss_nvram:
-  address: 0xf3000
-  end_address: 0xfb000
+  address: 0xd3000
+  end_address: 0xdb000
   region: flash_primary
   size: 0x8000
   placement:
@@ -41,8 +44,8 @@ zboss_nvram:
       - zboss_product_config
 
 zboss_product_config:
-  address: 0xfb000
-  end_address: 0x100000
+  address: 0xdb000
+  end_address: 0xe0000
   region: flash_primary
   size: 0x5000
   placement:
