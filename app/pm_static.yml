@@ -50,3 +50,9 @@ zboss_product_config:
   size: 0x5000
   placement:
     before: end
+
+nordic_uf2_bootloader:
+  address: 0xe0000
+  end_address: 0x100000
+  region: flash_primary
+  size: 0x20000
