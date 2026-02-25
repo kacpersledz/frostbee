@@ -8,7 +8,7 @@
 #   0x011000 - 0x081000  Primary slot     (448 KB)  -- running image
 #   0x081000 - 0x0f1000  Secondary slot   (448 KB)  -- OTA staging area
 #   0x0f1000 - 0x0f9000  ZBOSS NVRAM      ( 32 KB)  -- Zigbee network data
-#   0x0f9000 - 0x0fe000  ZBOSS product cfg( 20 KB)  -- Zigbee product config
+#   0x0f9000 - 0x100000  ZBOSS product cfg( 28 KB)  -- Zigbee product config
 #
 # Slots are 448 KB each (reclaimed former Nordic UF2 bootloader area).
 # UF2 is not used for OTA; all updates go through Zigbee FOTA via MCUboot.
@@ -45,8 +45,8 @@ zboss_nvram:
 
 zboss_product_config:
   address: 0xf9000
-  end_address: 0xfe000
+  end_address: 0x100000
   region: flash_primary
-  size: 0x5000
+  size: 0x7000
   placement:
     before: end
