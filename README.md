@@ -1,23 +1,22 @@
 # frostbee
 
-Outdoor Zigbee temperature and humidity sensor for the nRF52840 Dongle.
+Outdoor Zigbee temperature and humidity sensor based on the nRF52840 (nice!nano clone).
 
-Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT4X driver
-and ZBOSS Zigbee stack (Sleepy End Device).
+Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT40 sensor and ZBOSS Zigbee stack (Sleepy End Device). Supports Zigbee OTA firmware updates via MCUboot.
 
 ## Features
 
 - 🌡️ **Temperature & Humidity** — Sensirion SHT40 sensor (±0.2°C, ±1.8% RH accuracy)
 - 🔋 **Battery monitoring** — Real-time voltage/percentage via ADC (3× AA batteries)
 - 🐝 **Zigbee 3.0** — Sleepy end device with persistent network storage
-- ⏱️ **Power optimized** — 10-minute sensor reads, 18-hour battery reads (~150-200 µA idle)
-- 🔘 **Reset button** — Short press: force read, Long press: factory reset
+- ⏱️ **Power optimized** — 10-minute sensor reads, 18-hour battery reads
+- 🔘 **Reset button** — Short press: force read, Long press (5s): factory reset
 - 🏠 **Home Assistant** — Works with Zigbee2MQTT and ZHA out of the box
-- 🔌 **UF2 bootloader** — Safe firmware updates via drag-and-drop (no programmer needed)
+- 🔄 **Zigbee OTA** — Firmware updates over the air via MCUboot (no programmer needed after initial flash)
 
 ## Hardware
 
-- **Board:** nRF52840 Dongle (PCA10059)
+- **Board:** nRF52840 (nice!nano v2 clone from AliExpress)
 - **Sensor:** Sensirion SHT40-AD1B (I2C address 0x44)
 
 ### Pin Assignment
@@ -33,139 +32,121 @@ and ZBOSS Zigbee stack (Sleepy End Device).
 
 ### Battery Voltage Measurement
 
-The device measures battery voltage (3× AA in series, 3.0V - 4.5V) using a voltage divider with GPIO control for power saving:
+The device measures battery voltage (3× AA in series, 3.0V–4.5V) using a voltage divider with GPIO control for power saving:
 
 ```
 BAT+ ─── R1 (10kΩ) ─── [P0.29/ADC] ─┬─── R2 (10kΩ) ─── [P0.02/GPIO] ─── GND
-                                     │
-                                     └─── C (0.1µF) ─── GND
+                                      │
+                                      └─── C (0.1µF) ─── GND
 ```
 
-**How it works:**
-- **P0.02** is configured as **INPUT** (high-Z) when not measuring → 0µA power consumption
-- During measurement (once per 18h), **P0.02** is set to **OUTPUT LOW** → connects divider to GND
-- ADC reads voltage on **P0.29**, then **P0.02** returns to INPUT mode
-- Measurement duration: ~2ms per reading
-
-**Components:**
-- R1, R2: 10kΩ (voltage divider 1:2, scales 4.5V → 2.25V for ADC)
-- C1: 0.1µF (noise filtering, RC time constant = 1ms)
-- Power consumption: 150µA for ~2ms every 18h (negligible)
-
-**Voltage ranges:**
-- 3× AA fresh: 4.5V → 2.25V at ADC → 100% battery
-- 3× AA depleted: 3.0V → 1.5V at ADC → 0% battery
-- Low battery alarm: 3.0V (1.0V per cell)
+- **P0.02** is INPUT (high-Z) when idle → 0µA consumption
+- During measurement, **P0.02** goes OUTPUT LOW → connects divider to GND
+- ADC reads P0.29, then P0.02 returns to INPUT
 
 ### Measurement Intervals
 
-The device uses separate timers for optimal battery life:
-
-| Measurement | Interval | Rationale |
-|-------------|----------|-----------|
-| **Temperature/Humidity** | 600s (10 min) | Outdoor temps change slowly; sufficient for weather monitoring |
-| **Battery Voltage** | 64800s (18h) | Aligned with ZCL max reporting interval (65000s) |
-
-**Zigbee Reporting:** The coordinator (Z2M/ZHA) configures reporting independently via *Configure Reporting* command:
-- **Min interval:** Don't report more often than X seconds (e.g., 60s)
-- **Max interval:** Report at least once every X seconds (e.g., 3600s = 1h)
-- **Reportable change:** Report immediately if value changes by threshold (e.g., ±0.5°C)
-
-This means the device can send reports more frequently than the measurement interval if the coordinator requests it and values change significantly.
+| Measurement | Interval |
+|-------------|----------|
+| Temperature/Humidity | 600s (10 min) |
+| Battery Voltage | 64800s (18h) |
 
 ### Reset Button (P0.31)
 
-- **Short press (< 1s):** Forces immediate sensor + battery read (does not affect periodic timers)
+- **Short press (< 1s):** Forces immediate sensor + battery read
 - **Long press (≥ 5s):** Factory reset — leaves network, erases NVRAM, reboots into pairing mode
 
-## Build & Flash
-
-### Standard build (unified dev/prod configuration)
+## Flash Layout
 
 ```
-west build -b nrf52840dongle/nrf52840 app
+0x000000 - 0x001000  Nordic MBR       (  4 KB)  — CPU boot entry point
+0x001000 - 0x011000  MCUboot          ( 64 KB)  — OTA bootloader
+0x011000 - 0x081000  Primary slot     (448 KB)  — running firmware
+0x081000 - 0x0f1000  Secondary slot   (448 KB)  — OTA staging area
+0x0f1000 - 0x0f9000  ZBOSS NVRAM      ( 32 KB)  — Zigbee network data
+0x0f9000 - 0x100000  ZBOSS product cfg( 28 KB)  — Zigbee product config
 ```
 
-Copy the `.uf2` from `build/zephyr/` to the dongle in bootloader mode
-(double-tap RESET, dongle mounts as USB drive).
+## Build
 
-**Current configuration:**
-- ✅ **Logging enabled** (USB CDC serial, 115200 baud) — for development/debugging
-- ✅ **ZBOSS NVRAM included** (32KB + 16KB) — network persists across reboots
-- ✅ **RAM power-down off** — safe for UF2 bootloader (double-tap reset works)
-- ✅ **Production intervals** — 600s sensor, 64800s battery
-- ⚡ **Idle current:** ~150-200 µA (good for 1-2 years on 3× AA batteries)
+Requires [nRF Connect SDK v2.9.2](https://developer.nordicsemi.com/) with west.
 
-### Future battery optimizations (requires SWD access)
-
-Additional ~25-40 µA savings possible by disabling logging/serial and enabling RAM power-down.
-See [`TODO_battery.txt`](TODO_battery.txt) for details.
-
-> **Warning:** These optimizations can prevent the UF2 bootloader from detecting
-> double-tap reset. Only flash with these settings when you have SWD/J-Link access
-> for recovery.
-
-## Flash Partitioning
-
-Flash layout defined in [`pm_static.yml`](app/pm_static.yml):
-
-```
-0x000000 - 0x001000  MBR              (  4 KB)  — Nordic MBR
-0x001000 - 0x0cc000  Application      (812 KB)  — firmware
-0x0cc000 - 0x0d4000  ZBOSS NVRAM      ( 32 KB)  — Zigbee network data (persists)
-0x0d4000 - 0x0d8000  ZBOSS product cfg( 16 KB)  — Zigbee product config
-0x0d8000 - 0x100000  Bootloader       (160 KB)  — UF2 bootloader (protected)
+```bash
+west build -b nrf52840dongle/nrf52840 app --build-dir app/build
 ```
 
-**NVRAM placement:**
-- ZBOSS NVRAM partitions are placed safely **below** the bootloader region
-- Network credentials, bindings, and reporting config persist across reboots
-- No rejoin required after reboot (unless factory reset via button)
+Build outputs:
+- `app/build/merged.hex` — MCUboot + signed app (no MBR)
+- `app/build/frostbee_complete.hex` — MBR + MCUboot + signed app (for ST-Link flash) — **generated by CI**
+- `app/build/*.zigbee` — Zigbee OTA file for over-the-air updates
 
-**Bootloader protection:**
-- The 160 KB bootloader reservation is deliberately oversized for safety
-- After SWD recovery you can check the actual start address and reclaim flash:
-  ```
-  nrfjprog --memrd 0x10001014   # reads UICR.BOOTLOADERADDR
-  ```
+## Initial Flash (ST-Link)
 
-## Recovery (bricked dongle)
+The first flash requires an ST-Link (or other SWD debugger) connected to SWDIO, SWDCLK, GND.
 
-If double-tap reset no longer enters bootloader mode:
+> **Note:** This board uses a nice!nano clone with the Adafruit bootloader. The Nordic MBR
+> (`nice_nano_mbr.hex`) must be included in the flash image for the CPU to boot. The
+> `frostbee_complete.hex` artifact from CI already includes it.
 
-1. Connect a J-Link, ST-Link, or other SWD debugger to the dongle's
-   SWD pads (SWDIO, SWDCLK, GND).
-2. Re-flash the UF2 bootloader hex with `nrfjprog` or OpenOCD:
-   ```
-   nrfjprog --program <bootloader.hex> --chiperase --verify --reset
-   ```
-3. After recovery, use the **development build** (no release overlay)
-   until the firmware is validated.
+### Using a pre-built artifact from GitHub Actions
 
-## Serial Output
+Download `frostbee_complete.hex` from the [Actions](../../actions) tab, then:
 
-115200 baud, USB CDC serial (enabled by default for debugging):
-
-```
-[00:00:00.000,000] <inf> frostbee: Frostbee starting - Zigbee SHT40 sensor
-[00:00:00.100,000] <inf> frostbee: SHT40 sensor ready
-[00:00:00.200,000] <inf> frostbee: ADC ready on P0.29 (AIN5) for battery voltage
-[00:00:00.250,000] <inf> frostbee: Battery voltage divider control ready on P0.02
-[00:00:00.300,000] <inf> frostbee: Reset button ready on P0.31 (initial state: released)
+```bash
+# Give yourself 15 seconds to connect ST-Link pins (SWDIO, SWDCLK, GND)
+for i in $(seq 1 15); do sleep 1; echo "$i"; done && \
+openocd -f interface/stlink.cfg -f target/nrf52.cfg \
+  -c "init; reset halt; nrf5 mass_erase; \
+      program frostbee_complete.hex verify reset exit"
 ```
 
-Monitor with: `screen /dev/ttyACM0 115200` or `minicom -D /dev/ttyACM0 -b 115200`
+### Building and flashing locally
+
+```bash
+# 1. Build
+west build -b nrf52840dongle/nrf52840 app --build-dir app/build
+
+# 2. Merge MBR into the hex
+python3 $ZEPHYR_BASE/scripts/build/mergehex.py \
+  --overlap=replace \
+  app/build/merged.hex \
+  app/nice_nano_mbr.hex \
+  -o app/build/frostbee_complete.hex
+
+# 3. Flash
+for i in $(seq 1 15); do sleep 1; echo "$i"; done && \
+openocd -f interface/stlink.cfg -f target/nrf52.cfg \
+  -c "init; reset halt; nrf5 mass_erase; \
+      program app/build/frostbee_complete.hex verify reset exit"
+```
+
+After flashing, power the device from batteries and open the Zigbee network in Z2M — it will join automatically.
+
+## OTA Updates
+
+After the initial flash, all future updates are done over the air — no ST-Link needed.
+
+1. Push a version tag: `git tag v1.2.3 && git push origin v1.2.3`
+2. GitHub Actions builds and publishes a release with `frostbee-v1.2.3.zigbee`
+3. Z2M picks it up automatically (if configured) and offers the update to the device
+4. MCUboot validates and swaps the image on reboot — NVRAM and network credentials are preserved
+
+### Z2M automatic OTA configuration
+
+Add to `configuration.yaml`:
+
+```yaml
+ota:
+  zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
+  update_check_interval: 1440
+```
 
 ## Home Assistant Integration
 
-Frostbee works with both Zigbee2MQTT and ZHA:
-
-| Integration | Setup | Folder |
-|---|---|---|
-| **Zigbee2MQTT** | External converter (copy + config edit) | [`zigbee2mqtt/`](zigbee2mqtt/) |
-| **ZHA** | Works out of the box; optional quirk for device naming | [`zha/`](zha/) |
-
-See the README in each folder for step-by-step instructions.
+| Integration | Setup |
+|---|---|
+| **Zigbee2MQTT** | External converter — see [`zigbee2mqtt/`](zigbee2mqtt/) |
+| **ZHA** | Works out of the box; optional quirk in [`zha/`](zha/) |
 
 ## Project Structure
 
@@ -173,15 +154,24 @@ See the README in each folder for step-by-step instructions.
 frostbee/
 ├── app/
 │   ├── src/
-│   │   ├── main.c              # Main application (sensor, battery, Zigbee)
-│   │   ├── zb_frostbee.h       # Zigbee cluster definitions
-│   │   └── zb_mem_config_custom.h  # ZBOSS memory configuration
-│   ├── prj.conf                # Zephyr project configuration
-│   └── pm_static.yml           # Flash partition layout (with NVRAM)
-├── zigbee2mqtt/                # Zigbee2MQTT external converter
-├── zha/                        # ZHA optional quirk
-├── TODO_battery.txt            # Future power optimizations (requires SWD)
-└── README.md                   # This file
+│   │   ├── main.c                  # Main application
+│   │   ├── zb_frostbee.h           # Zigbee cluster definitions
+│   │   └── zb_mem_config_custom.h  # ZBOSS memory config
+│   ├── boards/
+│   │   └── nrf52840dongle_nrf52840.overlay  # Board pin assignments
+│   ├── child_image/
+│   │   └── mcuboot.conf            # MCUboot configuration
+│   ├── sysbuild/
+│   │   └── mcuboot.conf            # MCUboot sysbuild overrides
+│   ├── nice_nano_mbr.hex           # Nordic MBR (4KB, required for ST-Link flash)
+│   ├── pm_static.yml               # Flash partition layout
+│   ├── prj.conf                    # Zephyr configuration
+│   └── sysbuild.conf               # Sysbuild configuration (MCUboot enabled)
+├── .github/workflows/
+│   ├── build.yml                   # Build on every push
+│   └── release.yml                 # Release on version tags
+├── zigbee2mqtt/                    # Z2M external converter
+└── zha/                            # ZHA optional quirk
 ```
 
 ## License
