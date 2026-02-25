@@ -104,17 +104,19 @@ jobs:
             --build-dir ../build \
             -- "${ARGS[@]}"
 
-      - name: Create Zigbee OTA file
+      - name: Merge MBR into merged.hex
+        run: |
+          python3 sdk/zephyr/scripts/build/mergehex.py \
+            --overlap=replace \
+            build/merged.hex \
+            app/app/nice_nano_mbr.hex \
+            -o build/frostbee_complete.hex
+
+      - name: Rename Zigbee OTA file
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
-          FILE_VER: ${{ steps.ver.outputs.file_ver }}
         run: |
-          bash app/scripts/create_ota.sh \
-            --input       build/app/zephyr/zephyr.signed.bin \
-            --output      "$ARTIFACT" \
-            --manufacturer-id 0x1234 \
-            --image-type      0x0001 \
-            --file-version    "$FILE_VER"
+          cp build/*.zigbee "$ARTIFACT"
           cp "$ARTIFACT" frostbee.zigbee
 
       - name: Upload build artifacts
@@ -122,14 +124,15 @@ jobs:
         with:
           name: frostbee-${{ github.sha }}
           path: |
+            build/frostbee_complete.hex
             ${{ steps.ver.outputs.artifact }}
-            build/merged.hex
           if-no-files-found: warn
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            build/frostbee_complete.hex
             ${{ steps.ver.outputs.artifact }}
             frostbee.zigbee
           generate_release_notes: true
