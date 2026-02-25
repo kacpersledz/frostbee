@@ -12,31 +12,29 @@
 #
 # Slots are 448 KB each (reclaimed former Nordic UF2 bootloader area).
 # UF2 is not used for OTA; all updates go through Zigbee FOTA via MCUboot.
-# UICR.NRFFW[0] is not touched -- MBR boots Nordic bootloader which
-# then boots MCUboot as the "application". OTA updates stay within the
-# secondary slot and never reach the Nordic bootloader area.
+#
+# NOTE: nrf5_mbr and mcuboot are static so the only dynamic gap is
+# 0x11000-0x81000, forcing mcuboot_primary/app to land in the primary slot.
+# mcuboot_primary is NOT defined here — the partition manager creates it
+# dynamically as a container spanning mcuboot_pad + app.
+
+nrf5_mbr:
+  address: 0x0
+  region: flash_primary
+  size: 0x1000
 
 mcuboot:
   address: 0x1000
-  end_address: 0x11000
   region: flash_primary
   size: 0x10000
 
-mcuboot_primary:
-  address: 0x11000
-  end_address: 0x81000
-  region: flash_primary
-  size: 0x70000
-
 mcuboot_secondary:
   address: 0x81000
-  end_address: 0xf1000
   region: flash_primary
   size: 0x70000
 
 zboss_nvram:
   address: 0xf1000
-  end_address: 0xf9000
   region: flash_primary
   size: 0x8000
   placement:
@@ -45,7 +43,6 @@ zboss_nvram:
 
 zboss_product_config:
   address: 0xf9000
-  end_address: 0x100000
   region: flash_primary
   size: 0x7000
   placement:
