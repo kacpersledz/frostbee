@@ -1,4 +1,5 @@
 const m = require('zigbee-herdsman-converters/lib/modernExtend');
+const zigbeeOTA = require('zigbee-herdsman-converters/lib/ota/zigbeeOTA');
 
 module.exports = [
     {
@@ -6,6 +7,7 @@ module.exports = [
         model: 'FBE_TH_1',
         vendor: 'Frostbee',
         description: 'Temperature & humidity sensor (SHT40)',
+        ota: zigbeeOTA,
         extend: [
             m.battery({
                 voltage: true,
@@ -15,7 +17,6 @@ module.exports = [
             }),
             m.temperature({reporting: {min: 600, max: 3600, change: 10}}),
             m.humidity({reporting: {min: 600, max: 3600, change: 50}}),
-            m.ota(),
         ],
     },
 ];
