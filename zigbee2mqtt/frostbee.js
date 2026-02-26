@@ -14,5 +14,6 @@ export default {
         }),
         m.temperature({reporting: {min: 600, max: 3600, change: 10}}),
         m.humidity({reporting: {min: 600, max: 3600, change: 50}}),
+        m.ota(),
     ],
 };
