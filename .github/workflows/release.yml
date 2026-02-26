@@ -84,6 +84,8 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
           printf 'VERSION_MAJOR = %s\nVERSION_MINOR = %s\nPATCHLEVEL = %s\nVERSION_TWEAK = 0\n' \
             "$MAJOR" "$MINOR" "$PATCH" > app/app/VERSION
+          echo "--- app/app/VERSION ---"
+          cat app/app/VERSION
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).

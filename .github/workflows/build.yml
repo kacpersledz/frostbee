@@ -57,6 +57,8 @@ jobs:
         run: |
           printf 'VERSION_MAJOR = 0\nVERSION_MINOR = 0\nPATCHLEVEL = 0\nVERSION_TWEAK = 0\n' \
             > app/app/VERSION
+          echo "--- app/app/VERSION ---"
+          cat app/app/VERSION
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
