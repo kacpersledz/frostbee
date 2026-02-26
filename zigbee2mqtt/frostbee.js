@@ -5,6 +5,7 @@ export default {
     model: 'FBE_TH_1',
     vendor: 'Frostbee',
     description: 'Temperature & humidity sensor (SHT40)',
+    ota: true,
     extend: [
         m.battery({
             voltage: true,
