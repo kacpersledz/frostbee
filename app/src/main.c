@@ -793,7 +793,6 @@ void zboss_signal_handler(zb_bufid_t bufid)
 
 int main(void)
 {
-	LOG_INF("Frostbee starting v0.3.1 - Zigbee SHT40 sensor");
 
 	/* Get sensor device handle */
 	sht = DEVICE_DT_GET_ANY(sensirion_sht4x);
