@@ -64,19 +64,26 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      # v1.2.3  →  image_version="1.2.3+0"  file_version=0x01020300
+      # v1.2.3  →  file_version=0x01020300
       - name: Compute version
         id: ver
         run: |
           TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
           IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
-          IMG_VER="${MAJOR}.${MINOR}.${PATCH}+0"
           FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
           ARTIFACT="frostbee-${TAG}.zigbee"
-          echo "img_ver=$IMG_VER"         >> "$GITHUB_OUTPUT"
           echo "file_ver=$FILE_VER"       >> "$GITHUB_OUTPUT"
           echo "artifact=$ARTIFACT"       >> "$GITHUB_OUTPUT"
-          echo "Version: img=$IMG_VER  file=$FILE_VER"
+          echo "Version: file=$FILE_VER"
+
+      - name: Write VERSION file
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
+          printf 'VERSION_MAJOR = %s\nVERSION_MINOR = %s\nPATCHLEVEL = %s\nVERSION_TWEAK = 0\n' \
+            "$MAJOR" "$MINOR" "$PATCH" > app/app/VERSION
+          echo "--- app/app/VERSION ---"
+          cat app/app/VERSION
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
@@ -92,9 +99,8 @@ jobs:
       - name: Build firmware
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
-          IMG_VER: ${{ steps.ver.outputs.img_ver }}
         run: |
-          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
+          ARGS=()
           if [[ -n "$SIGNING_KEY" ]]; then
             ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
           fi
@@ -146,5 +152,4 @@ jobs:
               update_check_interval: 1440
             ```
 
-            **MCUboot image version:** `${{ steps.ver.outputs.img_ver }}`
             **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`

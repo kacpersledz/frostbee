@@ -45,13 +45,16 @@ jobs:
         id: ver
         run: |
           SHORT="${GITHUB_SHA::8}"
-          IMG_VER="0.0.0+0"
-          FILE_VER="0x00000000"
           ARTIFACT="frostbee-dev-${SHORT}.zigbee"
-          echo "img_ver=$IMG_VER"   >> "$GITHUB_OUTPUT"
-          echo "file_ver=$FILE_VER" >> "$GITHUB_OUTPUT"
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
-          echo "Version: img=$IMG_VER  file=$FILE_VER  sha=$SHORT"
+          echo "Version: dev sha=$SHORT"
+
+      - name: Write VERSION file
+        run: |
+          printf 'VERSION_MAJOR = 0\nVERSION_MINOR = 0\nPATCHLEVEL = 0\nVERSION_TWEAK = 0\n' \
+            > app/app/VERSION
+          echo "--- app/app/VERSION ---"
+          cat app/app/VERSION
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
@@ -67,9 +70,8 @@ jobs:
       - name: Build firmware
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
-          IMG_VER: ${{ steps.ver.outputs.img_ver }}
         run: |
-          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
+          ARGS=()
           if [[ -n "$SIGNING_KEY" ]]; then
             ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
           fi
