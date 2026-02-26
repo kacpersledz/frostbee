@@ -76,10 +76,14 @@ jobs:
           echo "img_ver=$IMG_VER"         >> "$GITHUB_OUTPUT"
           echo "file_ver=$FILE_VER"       >> "$GITHUB_OUTPUT"
           echo "artifact=$ARTIFACT"       >> "$GITHUB_OUTPUT"
-          echo "major=$MAJOR"             >> "$GITHUB_OUTPUT"
-          echo "minor=$MINOR"             >> "$GITHUB_OUTPUT"
-          echo "patch=$PATCH"             >> "$GITHUB_OUTPUT"
           echo "Version: img=$IMG_VER  file=$FILE_VER"
+
+      - name: Write VERSION file
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
+          printf 'VERSION_MAJOR = %s\nVERSION_MINOR = %s\nPATCHLEVEL = %s\nVERSION_TWEAK = 0\n' \
+            "$MAJOR" "$MINOR" "$PATCH" > app/app/VERSION
 
       # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
       # default development key is used (fine for testing, not for production).
@@ -96,19 +100,8 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
           IMG_VER: ${{ steps.ver.outputs.img_ver }}
-          MAJOR: ${{ steps.ver.outputs.major }}
-          MINOR: ${{ steps.ver.outputs.minor }}
-          PATCH: ${{ steps.ver.outputs.patch }}
         run: |
-          # CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION → MCUboot image header version
-          # VERSION_MAJOR/MINOR/PATCHLEVEL      → Zephyr app version used in Zigbee OTA fileVersion
-          ARGS=(
-            -Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\""
-            -DVERSION_MAJOR="$MAJOR"
-            -DVERSION_MINOR="$MINOR"
-            -DPATCHLEVEL="$PATCH"
-            -DVERSION_TWEAK=0
-          )
+          ARGS=(-Dapp_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$IMG_VER\"")
           if [[ -n "$SIGNING_KEY" ]]; then
             ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
           fi
