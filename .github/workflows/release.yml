@@ -64,17 +64,12 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      # v1.2.3  →  file_version=0x01020300
       - name: Compute version
         id: ver
         run: |
           TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
-          FILE_VER=$(printf "0x%02x%02x%02x00" "$MAJOR" "$MINOR" "$PATCH")
           ARTIFACT="frostbee-${TAG}.zigbee"
-          echo "file_ver=$FILE_VER"       >> "$GITHUB_OUTPUT"
-          echo "artifact=$ARTIFACT"       >> "$GITHUB_OUTPUT"
-          echo "Version: file=$FILE_VER"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Write VERSION file
         run: |
@@ -119,11 +114,17 @@ jobs:
             -o build/frostbee_complete.hex
 
       - name: Rename Zigbee OTA file
+        id: ota
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
         run: |
           cp build/*.zigbee "$ARTIFACT"
           cp "$ARTIFACT" frostbee.zigbee
+          ZIGBEE_NAME=$(basename build/*.zigbee)
+          FILE_VER_HEX="0x$(echo "$ZIGBEE_NAME" | cut -d'-' -f3)"
+          FILE_VER_DEC=$((16#$(echo "$ZIGBEE_NAME" | cut -d'-' -f3)))
+          echo "file_ver_hex=$FILE_VER_HEX" >> "$GITHUB_OUTPUT"
+          echo "file_ver_dec=$FILE_VER_DEC" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -152,4 +153,4 @@ jobs:
               update_check_interval: 1440
             ```
 
-            **Zigbee OTA file version:** `${{ steps.ver.outputs.file_ver }}`
+            **Zigbee OTA file version:** `${{ steps.ota.outputs.file_ver_hex }}` (`${{ steps.ota.outputs.file_ver_dec }}`)
