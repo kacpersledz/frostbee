@@ -142,13 +142,13 @@ jobs:
         run: |
           cd app
           printf '[
-  {
-    "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",
-    "manufacturerCode": 4660,
-    "imageType": 1,
-    "fileVersion": %s
-  }
-]\n' "$ARTIFACT" "$FILE_VER" > ota_index.json
+            {
+              "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",
+              "manufacturerCode": 4660,
+              "imageType": 1,
+              "fileVersion": %s
+            }
+          ]\n' "$ARTIFACT" "$FILE_VER" > ota_index.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ota_index.json
