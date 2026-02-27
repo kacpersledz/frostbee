@@ -135,6 +135,24 @@ jobs:
             ${{ steps.ver.outputs.artifact }}
           if-no-files-found: warn
 
+      - name: Update OTA index with new file version
+        run: |
+          cd app
+          printf '[
+  {
+    "url": "https://github.com/winterberryice/frostbee/releases/latest/download/frostbee.zigbee",
+    "manufacturerCode": 4660,
+    "imageType": 1,
+    "fileVersion": %s
+  }
+]\n' "${{ steps.ota.outputs.file_ver_dec }}" > ota_index.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ota_index.json
+          git diff --cached --quiet || git commit -m "chore: update OTA index for ${GITHUB_REF_NAME} (fileVersion: ${{ steps.ota.outputs.file_ver_hex }})"
+          git push origin HEAD:master
+        continue-on-error: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

@@ -2,6 +2,7 @@
   {
     "url": "https://github.com/winterberryice/frostbee/releases/latest/download/frostbee.zigbee",
     "manufacturerCode": 4660,
-    "imageType": 1
+    "imageType": 1,
+    "fileVersion": 262144
   }
 ]
