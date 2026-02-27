@@ -41,6 +41,7 @@ static void battery_periodic(zb_bufid_t bufid);
 static void sensor_read(void);
 static void battery_read(void);
 static void sensor_and_battery_read(void);
+static void sensor_and_battery_read_cb(zb_uint8_t param);
 
 /* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
 #define SENSOR_READ_INTERVAL_S   600    /* 10 minutes - temp/humidity */
@@ -153,7 +154,7 @@ static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NO
 static struct gpio_callback button_cb_data;
 static int64_t button_press_time;
 static bool button_pressed_state;  /* Track logical state */
-static bool long_press_handled;    /* Already triggered factory reset */
+static atomic_t long_press_handled; /* Already triggered factory reset */
 static struct k_work_delayable debounce_work;
 static struct k_work_delayable factory_reset_work;
 
@@ -175,7 +176,7 @@ static void factory_reset_handler(struct k_work *work)
 
 	/* Check if button is still held */
 	if (gpio_pin_get_dt(&reset_button) == 1) {
-		long_press_handled = true;
+		atomic_set(&long_press_handled, 1);
 		/* Schedule factory reset in ZBOSS context */
 		ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
 	}
@@ -197,22 +198,22 @@ static void debounce_handler(struct k_work *work)
 	if (pressed) {
 		/* Button pressed - record time and schedule factory reset check */
 		button_press_time = k_uptime_get();
-		long_press_handled = false;
+		atomic_set(&long_press_handled, 0);
 		k_work_schedule(&factory_reset_work, K_MSEC(BUTTON_FACTORY_RESET_MS));
 		LOG_INF("Button pressed - hold 5s for factory reset");
 	} else {
 		/* Button released - cancel factory reset, check for short press */
 		k_work_cancel_delayable(&factory_reset_work);
 
-		if (long_press_handled) {
+		if (atomic_get(&long_press_handled)) {
 			LOG_INF("Button released (monitoring now active)");
-			long_press_handled = false;  /* Ready for next press */
+			atomic_set(&long_press_handled, 0);  /* Ready for next press */
 		} else {
 			int64_t hold_time = k_uptime_get() - button_press_time;
 
 			if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
 				LOG_INF("Short press - forcing sensor+battery read");
-				sensor_and_battery_read();
+				ZB_SCHEDULE_APP_CALLBACK(sensor_and_battery_read_cb, 0);
 			} else {
 				LOG_INF("Button released after %lld ms (no action)", hold_time);
 			}
@@ -271,7 +272,7 @@ static int button_init(void)
 	if (button_pressed_state) {
 		LOG_INF("Button held on boot - waiting for release before monitoring");
 		/* Wait for button to be released before starting normal monitoring */
-		long_press_handled = true;  /* Suppress any actions until released */
+		atomic_set(&long_press_handled, 1);  /* Suppress any actions until released */
 	}
 
 	return 0;
@@ -637,8 +638,13 @@ static void sensor_read(void)
  */
 static void battery_read(void)
 {
-	/* Read battery voltage via ADC */
-	read_battery_voltage();
+	k_mutex_lock(&sensor_mutex, K_FOREVER);
+
+	if (read_battery_voltage() == 0) {
+		LOG_WRN("Battery read failed, skipping ZCL update");
+		k_mutex_unlock(&sensor_mutex);
+		return;
+	}
 
 	/* Update battery ZCL attributes */
 	ZB_ZCL_SET_ATTRIBUTE(
@@ -656,6 +662,8 @@ static void battery_read(void)
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
 		(zb_uint8_t *)&dev_ctx.battery_percentage,
 		ZB_FALSE);
+
+	k_mutex_unlock(&sensor_mutex);
 }
 
 /* Read both sensor and battery (used by button handler for on-demand reads).
@@ -667,6 +675,18 @@ static void sensor_and_battery_read(void)
 	battery_read();
 }
 
+/* ZBOSS callback wrapper for on-demand reads triggered from non-ZBOSS context
+ * (e.g. button handler running in a Zephyr work queue).
+ * ZB_ZCL_SET_ATTRIBUTE must be called from ZBOSS context — use
+ * ZB_SCHEDULE_APP_CALLBACK to marshal the call here instead of calling
+ * sensor_and_battery_read() directly from the work queue.
+ */
+static void sensor_and_battery_read_cb(zb_uint8_t param)
+{
+	ARG_UNUSED(param);
+	sensor_and_battery_read();
+}
+
 /* Periodic sensor read callback (called by Zigbee alarm scheduler). */
 static void sensor_periodic(zb_bufid_t bufid)
 {
@@ -674,10 +694,16 @@ static void sensor_periodic(zb_bufid_t bufid)
 
 	sensor_read();
 
-	/* Schedule next periodic sensor read */
+	/* Schedule next periodic sensor read.
+	 * Use overflow-safe pattern (same as battery_periodic): multiply
+	 * seconds by beacons_per_second rather than passing ms directly to
+	 * ZB_MILLISECONDS_TO_BEACON_INTERVAL, which multiplies by 1000
+	 * internally. If SENSOR_READ_INTERVAL_S ever exceeds ~4295 s (71 min)
+	 * the direct form overflows uint32_t.
+	 */
 	ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
-			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(
-				      SENSOR_READ_INTERVAL_S * 1000));
+			      (zb_time_t)SENSOR_READ_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
 /* Periodic battery read callback (called by Zigbee alarm scheduler). */
@@ -745,11 +771,18 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
 			LOG_INF("Joined network, starting periodic reads");
+			/* Cancel any existing alarms before rescheduling.
+			 * On STEERING (rejoin after coordinator restart) these may
+			 * already be running from the initial DEVICE_REBOOT signal.
+			 * Without cancelling first, ZBOSS may queue a duplicate.
+			 */
+			ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
+			ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
 			/* Start periodic sensor reading (temp/humidity every 10 min) */
 			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 			LOG_INF("Scheduled sensor_periodic in 1s");
-			/* Start periodic battery reading (voltage every 24h) */
+			/* Start periodic battery reading (voltage every 18h) */
 			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 			LOG_INF("Scheduled battery_periodic in 1s");
@@ -761,7 +794,7 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	case ZB_ZDO_SIGNAL_LEAVE:
 		/* Factory reset triggered - reboot after leaving network */
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
-		if (long_press_handled) {
+		if (atomic_get(&long_press_handled)) {
 			LOG_WRN("Left network after factory reset, rebooting...");
 			k_msleep(100);
 			sys_reboot(SYS_REBOOT_COLD);
@@ -841,7 +874,13 @@ int main(void)
 
 	/* Configure as sleepy end device */
 	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
-	zb_set_keepalive_timeout(ZB_MILLISECONDS_TO_BEACON_INTERVAL(3000));
+	/* Match ed_timeout so the coordinator buffers messages for the full
+	 * 64-minute window — prevents queued messages (e.g. Configure Reporting
+	 * from Z2M after coordinator restart) being dropped before the sleeping
+	 * device wakes up to collect them.
+	 * Use the overflow-safe pattern: seconds × beacons_per_second.
+	 */
+	zb_set_keepalive_timeout((zb_time_t)64 * 60 * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 	zigbee_configure_sleepy_behavior(true);
 
 	/* Power down unused RAM */
