@@ -19,6 +19,13 @@
 #include <ram_pwrdn.h>
 #include <zephyr/dfu/mcuboot.h>
 
+#ifdef APP_VERSION_STRING
+#include <app_version.h>
+#define FROSTBEE_SW_VERSION APP_VERSION_STRING
+#else
+#define FROSTBEE_SW_VERSION "dev"
+#endif
+
 #include <zboss_api.h>
 #include <zboss_api_addons.h>
 #include <zigbee/zigbee_app_utils.h>
@@ -435,6 +442,12 @@ static void clusters_attr_init(void)
 
 	dev_ctx.basic_attr.ph_env = FROSTBEE_INIT_BASIC_PH_ENV;
 
+	/* Software version (shows in Z2M as human-readable string) */
+	ZB_ZCL_SET_STRING_VAL(
+		dev_ctx.basic_attr.sw_ver,
+		FROSTBEE_SW_VERSION,
+		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
+
 	/* Identify cluster */
 	dev_ctx.identify_attr.identify_time =
 		ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
@@ -727,10 +740,21 @@ static void battery_periodic(zb_bufid_t bufid)
 
 /* ─── Zigbee FOTA ─── */
 
+static bool ota_in_progress;
+
 static void fota_evt_handler(const struct zigbee_fota_evt *evt)
 {
 	switch (evt->id) {
 	case ZIGBEE_FOTA_EVT_PROGRESS:
+		if (!ota_in_progress) {
+			ota_in_progress = true;
+			/* Keep device awake during OTA transfer.
+			 * Without this, the sleepy end device goes back to sleep
+			 * between block requests and the transfer stalls.
+			 */
+			zigbee_configure_sleepy_behavior(false);
+			LOG_INF("OTA transfer started - sleep disabled");
+		}
 		LOG_INF("OTA progress: %d%%", evt->dl.progress);
 		break;
 
@@ -741,6 +765,11 @@ static void fota_evt_handler(const struct zigbee_fota_evt *evt)
 
 	case ZIGBEE_FOTA_EVT_ERROR:
 		LOG_ERR("OTA update failed");
+		if (ota_in_progress) {
+			ota_in_progress = false;
+			zigbee_configure_sleepy_behavior(true);
+			LOG_INF("OTA failed - sleep re-enabled");
+		}
 		break;
 
 	default:
@@ -907,7 +936,7 @@ int main(void)
 	/* Start Zigbee stack */
 	zigbee_enable();
 
-	LOG_INF("Frostbee Zigbee stack started");
+	LOG_INF("Frostbee %s - Zigbee stack started", FROSTBEE_SW_VERSION);
 
 	while (1) {
 		k_sleep(K_FOREVER);
