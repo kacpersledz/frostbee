@@ -135,6 +135,29 @@ jobs:
             ${{ steps.ver.outputs.artifact }}
           if-no-files-found: warn
 
+      - name: Update OTA index on master
+        env:
+          ARTIFACT: ${{ steps.ver.outputs.artifact }}
+          FILE_VER: ${{ steps.ota.outputs.file_ver_dec }}
+        run: |
+          cd app
+          printf '[
+  {
+    "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",
+    "manufacturerCode": 4660,
+    "imageType": 1,
+    "fileVersion": %s
+  }
+]\n' "$ARTIFACT" "$FILE_VER" > ota_index.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ota_index.json
+          git diff --cached --quiet || {
+            git commit -m "chore: update OTA index for ${GITHUB_REF_NAME}"
+            git push origin HEAD:master
+          }
+        continue-on-error: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
