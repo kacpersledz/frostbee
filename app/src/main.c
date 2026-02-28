@@ -45,9 +45,9 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 /* Forward declarations */
 static void sensor_periodic(zb_bufid_t bufid);
 static void battery_periodic(zb_bufid_t bufid);
-static void sensor_read(void);
-static void battery_read(void);
-static void sensor_and_battery_read(void);
+static void sensor_read(zb_bool_t force_report);
+static void battery_read(zb_bool_t force_report);
+static void sensor_and_battery_read(zb_bool_t force_report);
 static void sensor_and_battery_read_cb(zb_uint8_t param);
 
 /* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
@@ -607,8 +607,9 @@ static uint8_t read_battery_voltage(void)
 
 /* Read temperature/humidity sensor and update ZCL attributes.
  * Thread-safe via mutex - can be called from button or timer context.
+ * force_report: ZB_TRUE = send report immediately, ZB_FALSE = let ZBOSS decide.
  */
-static void sensor_read(void)
+static void sensor_read(zb_bool_t force_report)
 {
 	struct sensor_value temp, hum;
 	int ret;
@@ -644,10 +645,9 @@ static void sensor_read(void)
 		temp.val1, temp.val2 / 10000, temp_zcl,
 		hum.val1, hum.val2 / 10000, hum_zcl);
 
-	/* Update ZCL attributes — ZB_FALSE just stores the value.
-	 * The ZBOSS reporting engine sends reports automatically
-	 * based on the coordinator's Configure Reporting thresholds
-	 * (min/max interval, reportable change).
+	/* Update ZCL attributes.
+	 * ZB_FALSE = store value, let reporting engine decide when to send.
+	 * ZB_TRUE  = mark as changed, force report on next poll (button press).
 	 */
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
@@ -655,7 +655,7 @@ static void sensor_read(void)
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
 		(zb_uint8_t *)&temp_zcl,
-		ZB_FALSE);
+		force_report);
 
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
@@ -663,7 +663,7 @@ static void sensor_read(void)
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
 		(zb_uint8_t *)&hum_zcl,
-		ZB_FALSE);
+		force_report);
 
 	k_mutex_unlock(&sensor_mutex);
 }
@@ -671,7 +671,7 @@ static void sensor_read(void)
 /* Read battery voltage and update ZCL attributes.
  * Thread-safe - can be called from button or timer context.
  */
-static void battery_read(void)
+static void battery_read(zb_bool_t force_report)
 {
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
@@ -688,7 +688,7 @@ static void battery_read(void)
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
 		(zb_uint8_t *)&dev_ctx.battery_voltage,
-		ZB_FALSE);
+		force_report);
 
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
@@ -696,7 +696,7 @@ static void battery_read(void)
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
 		(zb_uint8_t *)&dev_ctx.battery_percentage,
-		ZB_FALSE);
+		force_report);
 
 	k_mutex_unlock(&sensor_mutex);
 }
@@ -704,22 +704,19 @@ static void battery_read(void)
 /* Read both sensor and battery (used by button handler for on-demand reads).
  * Does not affect periodic timers.
  */
-static void sensor_and_battery_read(void)
+static void sensor_and_battery_read(zb_bool_t force_report)
 {
-	sensor_read();
-	battery_read();
+	sensor_read(force_report);
+	battery_read(force_report);
 }
 
-/* ZBOSS callback wrapper for on-demand reads triggered from non-ZBOSS context
- * (e.g. button handler running in a Zephyr work queue).
- * ZB_ZCL_SET_ATTRIBUTE must be called from ZBOSS context — use
- * ZB_SCHEDULE_APP_CALLBACK to marshal the call here instead of calling
- * sensor_and_battery_read() directly from the work queue.
+/* ZBOSS callback wrapper for on-demand button reads.
+ * Forces immediate reports so data appears in HA right away.
  */
 static void sensor_and_battery_read_cb(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
-	sensor_and_battery_read();
+	sensor_and_battery_read(ZB_TRUE);
 }
 
 /* Periodic sensor read callback (called by Zigbee alarm scheduler). */
@@ -727,7 +724,7 @@ static void sensor_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
-	sensor_read();
+	sensor_read(ZB_FALSE);
 
 	/* Schedule next periodic sensor read.
 	 * Use overflow-safe pattern (same as battery_periodic): multiply
@@ -746,7 +743,7 @@ static void battery_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
 
-	battery_read();
+	battery_read(ZB_FALSE);
 
 	/* Schedule next periodic battery read.
 	 * NOTE: Cannot pass BATTERY_READ_INTERVAL_S * 1000 directly to
