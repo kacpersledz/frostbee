@@ -58,7 +58,7 @@ static void sensor_and_battery_read_cb(zb_uint8_t param);
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
 #define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
 #define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
-#define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA */
+#define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA (handy for update testing) */
 
 /* Reset button GPIO */
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
