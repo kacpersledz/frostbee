@@ -19,7 +19,7 @@
 #include <ram_pwrdn.h>
 #include <zephyr/dfu/mcuboot.h>
 
-#ifdef APP_VERSION_STRING
+#if __has_include(<app_version.h>)
 #include <app_version.h>
 #define FROSTBEE_SW_VERSION APP_VERSION_STRING
 #else
