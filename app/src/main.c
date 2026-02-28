@@ -422,7 +422,7 @@ ZB_DECLARE_FROSTBEE_EP(
 	FROSTBEE_ENDPOINT,
 	frostbee_clusters);
 
-/* The zigbee_fota module registers its own OTA Upgrade endpoint (ep 33).
+/* The zigbee_fota module registers its own OTA Upgrade endpoint (ep 10).
  * Declare a 2-endpoint device context: sensor endpoint + FOTA endpoint.
  */
 ZBOSS_DECLARE_DEVICE_CTX_2_EP(
@@ -759,6 +759,22 @@ static void battery_periodic(zb_bufid_t bufid)
 
 /* ─── Zigbee FOTA ─── */
 
+/* ZCL device callback - forwards OTA upgrade events to the FOTA library.
+ * Without this, the ZBOSS stack cannot invoke the application-level OTA
+ * handler and Image Notify messages are silently ignored.
+ */
+static void zcl_device_cb(zb_bufid_t bufid)
+{
+	zb_zcl_device_callback_param_t *device_cb_param =
+		ZB_BUF_GET_PARAM(bufid, zb_zcl_device_callback_param_t);
+
+	if (device_cb_param->device_cb_id == ZB_ZCL_OTA_UPGRADE_VALUE_CB_ID) {
+		zigbee_fota_zcl_cb(bufid);
+	} else {
+		device_cb_param->status = RET_NOT_IMPLEMENTED;
+	}
+}
+
 static void fota_evt_handler(const struct zigbee_fota_evt *evt)
 {
 	switch (evt->id) {
@@ -933,6 +949,11 @@ int main(void)
 	if (IS_ENABLED(CONFIG_RAM_POWER_DOWN_LIBRARY)) {
 		power_down_unused_ram();
 	}
+
+	/* Register ZCL device callback (must be before ZB_AF_REGISTER_DEVICE_CTX).
+	 * This enables the FOTA library to handle OTA Image Notify messages.
+	 */
+	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
 
 	/* Register device context and initialize attributes */
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
