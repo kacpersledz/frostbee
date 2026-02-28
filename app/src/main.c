@@ -58,6 +58,7 @@ static void sensor_and_battery_read_cb(zb_uint8_t param);
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
 #define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
 #define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
+#define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA */
 
 /* Reset button GPIO */
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
@@ -155,6 +156,9 @@ static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vba
 /* Mutex to protect sensor access from concurrent reads */
 static K_MUTEX_DEFINE(sensor_mutex);
 
+/* OTA state (used by button wake logic and FOTA handler) */
+static bool ota_in_progress;
+
 /* Reset button */
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
@@ -164,6 +168,19 @@ static bool button_pressed_state;  /* Track logical state */
 static atomic_t long_press_handled; /* Already triggered factory reset */
 static struct k_work_delayable debounce_work;
 static struct k_work_delayable factory_reset_work;
+static struct k_work_delayable wake_timeout_work;
+
+static void wake_timeout_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (ota_in_progress) {
+		LOG_INF("Wake timeout - OTA in progress, staying awake");
+		return;
+	}
+	zigbee_configure_sleepy_behavior(true);
+	LOG_INF("Wake timeout - sleep re-enabled");
+}
 
 static void do_factory_reset(zb_uint8_t param)
 {
@@ -219,8 +236,12 @@ static void debounce_handler(struct k_work *work)
 			int64_t hold_time = k_uptime_get() - button_press_time;
 
 			if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
-				LOG_INF("Short press - forcing sensor+battery read");
+				LOG_INF("Short press - sensor read + awake %ds for OTA",
+					BUTTON_WAKE_DURATION_S);
 				ZB_SCHEDULE_APP_CALLBACK(sensor_and_battery_read_cb, 0);
+				zigbee_configure_sleepy_behavior(false);
+				k_work_reschedule(&wake_timeout_work,
+						  K_SECONDS(BUTTON_WAKE_DURATION_S));
 			} else {
 				LOG_INF("Button released after %lld ms (no action)", hold_time);
 			}
@@ -266,6 +287,7 @@ static int button_init(void)
 
 	k_work_init_delayable(&debounce_work, debounce_handler);
 	k_work_init_delayable(&factory_reset_work, factory_reset_handler);
+	k_work_init_delayable(&wake_timeout_work, wake_timeout_handler);
 
 	/* Initialize state from current pin level.
 	 * If button is pressed on boot (e.g., still held from factory reset),
@@ -739,8 +761,6 @@ static void battery_periodic(zb_bufid_t bufid)
 }
 
 /* ─── Zigbee FOTA ─── */
-
-static bool ota_in_progress;
 
 static void fota_evt_handler(const struct zigbee_fota_evt *evt)
 {
