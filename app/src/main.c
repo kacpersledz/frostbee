@@ -55,11 +55,16 @@ static void sensor_and_battery_read_cb(zb_uint8_t param);
 #define BATTERY_READ_INTERVAL_S  64800  /* 18 hours - aligned with ZCL max reporting interval */
 
 /* Reset button timing (milliseconds) */
-#define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
+#define BUTTON_DEBOUNCE_MS         200    /* Cable/jumper input is noisy, use stronger debounce */
+#define BUTTON_MIN_PRESS_MS        80     /* Ignore ultra-short glitches */
 #define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
 #define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
+#define BUTTON_FACTORY_RESET_ENABLED 0    /* Safer default for jumper-to-GND "button" */
+#define BUTTON_BOOT_GUARD_MS       3000   /* Ignore edges during early boot settling */
 #define BUTTON_WAKE_DURATION_S     300    /* Stay awake after short press for OTA start */
 #define JOIN_AWAKE_DURATION_S      300    /* Stay awake after (re)join for interview/config */
+#define KEEPALIVE_POLL_INTERVAL_S  30     /* Sleepy poll period for parent buffered data */
+#define ED_CHILD_TIMEOUT_MIN       64     /* Parent keeps child entry this long */
 
 /* Reset button GPIO */
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
@@ -165,6 +170,7 @@ static bool ota_in_progress;
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
 static struct gpio_callback button_cb_data;
 static int64_t button_press_time;
+static int64_t button_guard_until;
 static bool button_pressed_state;  /* Track logical state */
 static atomic_t long_press_handled; /* Already triggered factory reset */
 static struct k_work_delayable debounce_work;
@@ -218,14 +224,24 @@ static void factory_reset_handler(struct k_work *work)
 	/* Check if button is still held */
 	if (reset_button_is_pressed()) {
 		atomic_set(&long_press_handled, 1);
-		/* Schedule factory reset in ZBOSS context */
-		ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
+		if (BUTTON_FACTORY_RESET_ENABLED) {
+			LOG_WRN("Long press detected - scheduling factory reset");
+			/* Schedule factory reset in ZBOSS context */
+			ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
+		} else {
+			LOG_WRN("Long press detected - factory reset disabled (safe mode)");
+		}
 	}
 }
 
 static void debounce_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	if (k_uptime_get() < button_guard_until) {
+		LOG_DBG("Ignoring button edge during boot guard");
+		return;
+	}
 
 	/* Read the settled state after debounce period */
 	bool pressed = reset_button_is_pressed();
@@ -241,18 +257,28 @@ static void debounce_handler(struct k_work *work)
 		button_press_time = k_uptime_get();
 		atomic_set(&long_press_handled, 0);
 		k_work_schedule(&factory_reset_work, K_MSEC(BUTTON_FACTORY_RESET_MS));
-		LOG_INF("Button pressed - hold 5s for factory reset");
+		if (BUTTON_FACTORY_RESET_ENABLED) {
+			LOG_INF("Button pressed - hold 5s for factory reset");
+		} else {
+			LOG_INF("Button pressed - hold 5s for factory reset path test (disabled)");
+		}
 	} else {
 		/* Button released - cancel factory reset, check for short press */
 		k_work_cancel_delayable(&factory_reset_work);
 
 		if (atomic_get(&long_press_handled)) {
-			LOG_INF("Button released (monitoring now active)");
+			if (BUTTON_FACTORY_RESET_ENABLED) {
+				LOG_INF("Button released after long press (factory reset path executed)");
+			} else {
+				LOG_INF("Button released after long press (factory reset was disabled)");
+			}
 			atomic_set(&long_press_handled, 0);  /* Ready for next press */
 		} else {
 			int64_t hold_time = k_uptime_get() - button_press_time;
 
-			if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
+			if (hold_time < BUTTON_MIN_PRESS_MS) {
+				LOG_DBG("Ignoring short glitch (%lld ms)", hold_time);
+			} else if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
 				LOG_INF("Short press - sensor read + awake %ds for OTA",
 					BUTTON_WAKE_DURATION_S);
 				ZB_SCHEDULE_APP_CALLBACK(sensor_and_battery_read_cb, 0);
@@ -305,6 +331,7 @@ static int button_init(void)
 	k_work_init_delayable(&debounce_work, debounce_handler);
 	k_work_init_delayable(&factory_reset_work, factory_reset_handler);
 	k_work_init_delayable(&wake_timeout_work, wake_timeout_handler);
+	button_guard_until = k_uptime_get() + BUTTON_BOOT_GUARD_MS;
 
 	/* Initialize state from current pin level.
 	 * If button is pressed on boot (e.g., still held from factory reset),
@@ -319,6 +346,10 @@ static int button_init(void)
 		LOG_INF("Button held on boot - waiting for release before monitoring");
 		/* Wait for button to be released before starting normal monitoring */
 		atomic_set(&long_press_handled, 1);  /* Suppress any actions until released */
+	}
+
+	if (!BUTTON_FACTORY_RESET_ENABLED) {
+		LOG_INF("Factory reset via button is disabled (jumper-safe mode)");
 	}
 
 	return 0;
@@ -960,15 +991,23 @@ int main(void)
 	}
 #endif
 
-	/* Configure as sleepy end device */
-	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
-	/* Match ed_timeout so the coordinator buffers messages for the full
-	 * 64-minute window — prevents queued messages (e.g. Configure Reporting
-	 * from Z2M after coordinator restart) being dropped before the sleeping
-	 * device wakes up to collect them.
-	 * Use the overflow-safe pattern: seconds × beacons_per_second.
+	/* Configure as sleepy end device.
+	 * IMPORTANT: these two timers mean different things:
+	 *  - ed_timeout: parent keeps our child entry for up to 64 minutes.
+	 *  - keepalive/poll: how often WE ask parent for buffered data.
+	 *
+	 * Keeping both at 64 minutes is a common mistake and causes apparent
+	 * "hangs" after coordinator restarts because queued commands are collected
+	 * very late. Use long ed_timeout + short poll interval.
 	 */
-	zb_set_keepalive_timeout((zb_time_t)64 * 60 * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
+	/* Poll parent every 30 s while sleepy so buffered commands (e.g. configure
+	 * reporting / bind / OTA notify) are delivered promptly.
+	 * Keep ed_timeout at 64 min so parent does not drop us quickly.
+	 * Use overflow-safe pattern: seconds x beacons_per_second.
+	 */
+	zb_set_keepalive_timeout((zb_time_t)KEEPALIVE_POLL_INTERVAL_S *
+				 ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 	zigbee_configure_sleepy_behavior(true);
 
 	/* Power down unused RAM */

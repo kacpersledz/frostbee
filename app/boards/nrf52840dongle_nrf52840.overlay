@@ -14,7 +14,8 @@
 	buttons {
 		compatible = "gpio-keys";
 		reset_button: button_0 {
-			gpios = <&gpio0 31 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+			/* Jumper-style button: idle open, press by shorting to GND */
+			gpios = <&gpio0 31 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Reset button";
 		};
 	};
