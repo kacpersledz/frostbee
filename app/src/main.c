@@ -58,7 +58,8 @@ static void sensor_and_battery_read_cb(zb_uint8_t param);
 #define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
 #define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
 #define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
-#define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA (handy for update testing) */
+#define BUTTON_WAKE_DURATION_S     300    /* Stay awake after short press for OTA start */
+#define JOIN_AWAKE_DURATION_S      300    /* Stay awake after (re)join for interview/config */
 
 /* Reset button GPIO */
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
@@ -170,6 +171,22 @@ static struct k_work_delayable debounce_work;
 static struct k_work_delayable factory_reset_work;
 static struct k_work_delayable wake_timeout_work;
 
+static bool reset_button_is_pressed(void)
+{
+	int value = gpio_pin_get_dt(&reset_button);
+
+	if (value < 0) {
+		LOG_ERR("Failed to read reset button state: %d", value);
+		return false;
+	}
+
+	if (reset_button.dt_flags & GPIO_ACTIVE_LOW) {
+		return value == 0;
+	}
+
+	return value != 0;
+}
+
 static void wake_timeout_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -199,7 +216,7 @@ static void factory_reset_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	/* Check if button is still held */
-	if (gpio_pin_get_dt(&reset_button) == 1) {
+	if (reset_button_is_pressed()) {
 		atomic_set(&long_press_handled, 1);
 		/* Schedule factory reset in ZBOSS context */
 		ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
@@ -211,7 +228,7 @@ static void debounce_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	/* Read the settled state after debounce period */
-	int pressed = gpio_pin_get_dt(&reset_button);
+	bool pressed = reset_button_is_pressed();
 
 	/* Only act if state actually changed */
 	if (pressed == button_pressed_state) {
@@ -293,7 +310,7 @@ static int button_init(void)
 	 * If button is pressed on boot (e.g., still held from factory reset),
 	 * wait for release before monitoring to avoid spurious actions.
 	 */
-	button_pressed_state = gpio_pin_get_dt(&reset_button);
+	button_pressed_state = reset_button_is_pressed();
 
 	LOG_INF("Reset button ready on P0.31 (initial state: %s)",
 		button_pressed_state ? "pressed" : "released");
@@ -833,6 +850,15 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
 			LOG_INF("Joined network, starting periodic reads");
+		#if DT_NODE_EXISTS(RESET_BUTTON_NODE)
+			/* Keep device awake briefly so coordinator can finish interview,
+			 * bindings, and configure reporting without racing sleep.
+			 */
+			zigbee_configure_sleepy_behavior(false);
+			k_work_reschedule(&wake_timeout_work,
+					  K_SECONDS(JOIN_AWAKE_DURATION_S));
+			LOG_INF("Sleep disabled for %ds after join", JOIN_AWAKE_DURATION_S);
+		#endif
 			/* Cancel any existing alarms before rescheduling.
 			 * On STEERING (rejoin after coordinator restart) these may
 			 * already be running from the initial DEVICE_REBOOT signal.

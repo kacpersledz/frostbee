@@ -53,7 +53,7 @@ BAT+ ─── R1 (10kΩ) ─── [P0.29/ADC] ─┬─── R2 (10kΩ) ─�
 
 ### Reset Button (P0.31)
 
-- **Short press (< 1s):** Forces immediate sensor + battery read
+- **Short press (< 1s):** Forces immediate sensor + battery read and keeps radio awake for 5 minutes (OTA window)
 - **Long press (≥ 5s):** Factory reset — leaves network, erases NVRAM, reboots into pairing mode
 
 ## Flash Layout
