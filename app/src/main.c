@@ -59,6 +59,7 @@ static void sensor_and_battery_read_cb(zb_uint8_t param);
 #define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
 #define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
 #define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA (handy for update testing) */
+#define JOIN_WAKE_DURATION_S       600    /* Keep awake after join for interview/reporting setup */
 
 /* Reset button GPIO */
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
@@ -158,6 +159,20 @@ static K_MUTEX_DEFINE(sensor_mutex);
 
 /* OTA state (used by button wake logic and FOTA handler) */
 static bool ota_in_progress;
+static struct k_work_delayable join_wake_timeout_work;
+
+static void join_wake_timeout_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (ota_in_progress) {
+		LOG_INF("Join wake timeout - OTA in progress, staying awake");
+		return;
+	}
+
+	zigbee_configure_sleepy_behavior(true);
+	LOG_INF("Join wake timeout - sleep re-enabled");
+}
 
 /* Reset button */
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
@@ -833,6 +848,15 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
 			LOG_INF("Joined network, starting periodic reads");
+			/* Keep the device awake right after join/rejoin.
+			 * This gives coordinator time to finish interview, binding,
+			 * and Configure Reporting before the sleepy device starts
+			 * long sleep intervals.
+			 */
+			zigbee_configure_sleepy_behavior(false);
+			k_work_reschedule(&join_wake_timeout_work,
+					  K_SECONDS(JOIN_WAKE_DURATION_S));
+			LOG_INF("Join wake window active for %ds", JOIN_WAKE_DURATION_S);
 			/* Cancel any existing alarms before rescheduling.
 			 * On STEERING (rejoin after coordinator restart) these may
 			 * already be running from the initial DEVICE_REBOOT signal.
@@ -888,6 +912,7 @@ void zboss_signal_handler(zb_bufid_t bufid)
 
 int main(void)
 {
+	k_work_init_delayable(&join_wake_timeout_work, join_wake_timeout_handler);
 
 	/* Get sensor device handle */
 	sht = DEVICE_DT_GET_ANY(sensirion_sht4x);

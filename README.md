@@ -152,6 +152,8 @@ ota:
 
 ```
 frostbee/
+├── docs/
+│   └── zigbee_stability_notes.md   # Practical SED stability patterns + Z2M-only diagnostics
 ├── app/
 │   ├── src/
 │   │   ├── main.c                  # Main application
@@ -173,6 +175,14 @@ frostbee/
 ├── zigbee2mqtt/                    # Z2M external converter
 └── zha/                            # ZHA optional quirk
 ```
+
+## Operational Notes
+
+- See [`docs/zigbee_stability_notes.md`](docs/zigbee_stability_notes.md) for practical guidance on:
+  - common stable Zigbee sleepy sensor patterns,
+  - button behavior trade-offs,
+  - Zigbee2MQTT `.js` vs `.mjs` converter handling,
+  - diagnostics when only Z2M logs are available (no USB serial logs).
 
 ## License
 

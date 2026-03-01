@@ -102,10 +102,12 @@ This means the external converter is not being loaded. Check:
    # "SyntaxError"
    ```
 
-3. **Ensure correct file format:**
-   - Z2M v2.x supports both CommonJS (`module.exports`) and ES6 modules (`export default`)
-   - The provided `frostbee.js` uses ES6 format
-   - If you have issues, try the CommonJS version (see below)
+3. **Use the CommonJS file first (`frostbee.js`):**
+   - Z2M v2.x supports both CommonJS (`module.exports`) and ES modules (`export default`), but many installations are still more reliable with `.js` + CommonJS.
+   - This repository ships both formats:
+     - `frostbee.js` (recommended default)
+     - `frostbee.mjs` (ES module alternative)
+   - If your logs show converter parse/load errors, switch to the other format.
 
 4. **Remove old configuration:**
    - If upgrading from Z2M v1.x, remove the `external_converters:` section from `configuration.yaml`
