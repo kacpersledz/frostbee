@@ -10,7 +10,8 @@
 	],
 	"settings": {
 		"nrf-connect.applications": [
-			"${workspaceFolder}/app"
+			"${workspaceFolder}/app",
+			"${workspaceFolder}/app_uf2"
 		]
 	}
 }
