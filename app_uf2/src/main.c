@@ -23,8 +23,8 @@
 LOG_MODULE_REGISTER(frostbee_uf2, LOG_LEVEL_DBG);
 
 /* Intervals */
-#define SENSOR_READ_INTERVAL_S   600    /* 10 minutes */
-#define BATTERY_READ_INTERVAL_S  64800  /* 18 hours */
+#define SENSOR_READ_INTERVAL_S   10   /* test mode: frequent sensor updates */
+#define BATTERY_READ_INTERVAL_S  60   /* test mode: frequent battery updates */
 #define BATTERY_TICK_DIV         (BATTERY_READ_INTERVAL_S / SENSOR_READ_INTERVAL_S)
 
 /* Button timing */
@@ -208,6 +208,8 @@ static void measure_work_handler(struct k_work *work)
 		LOG_INF("Forced measurement triggered by button");
 		read_sensor_once();
 		read_battery_once();
+		/* Keep periodic loop alive after ad-hoc button-triggered reads. */
+		k_work_schedule(&measure_work, K_SECONDS(SENSOR_READ_INTERVAL_S));
 		return;
 	}
 
