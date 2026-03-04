@@ -2,9 +2,9 @@
  * Frostbee UF2 battlefield app
  *
  * Purpose:
- * - Validate sensor reads, battery measurement, and button logic
- * - Keep logs accessible over USB CDC ACM
- * - Stay fully independent from Zigbee/OTA until behavior is stable
+ * - Keep UF2 fast iteration workflow
+ * - Add minimal Zigbee SED core (no OTA)
+ * - Keep USB logs explicit for join/rejoin/sleep/reporting behavior
  *
  * SPDX-License-Identifier: MIT
  */
@@ -20,12 +20,16 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usb_device.h>
 
+#include <zboss_api.h>
+#include <zboss_api_addons.h>
+#include <zigbee/zigbee_app_utils.h>
+#include <zigbee/zigbee_error_handler.h>
+
 LOG_MODULE_REGISTER(frostbee_uf2, LOG_LEVEL_DBG);
 
-/* Intervals */
-#define SENSOR_READ_INTERVAL_S   10   /* test mode: frequent sensor updates */
-#define BATTERY_READ_INTERVAL_S  60   /* test mode: frequent battery updates */
-#define BATTERY_TICK_DIV         (BATTERY_READ_INTERVAL_S / SENSOR_READ_INTERVAL_S)
+/* Zigbee + reporting */
+#define FROSTBEE_ENDPOINT      1
+#define REPORT_INTERVAL_S      15
 
 /* Button timing */
 #define BUTTON_DEBOUNCE_MS         100
@@ -40,7 +44,37 @@ LOG_MODULE_REGISTER(frostbee_uf2, LOG_LEVEL_DBG);
 #define ADC_GAIN_FACTOR 6
 #define VDIV_FACTOR     2
 
+/* Temperature measurement range: -40.00 C to +125.00 C (SHT40 spec) */
+#define FROSTBEE_TEMP_MIN_VALUE  (-4000)
+#define FROSTBEE_TEMP_MAX_VALUE  12500
+
+/* Humidity measurement range: 0.00% to 100.00% */
+#define FROSTBEE_HUM_MIN_VALUE   0
+#define FROSTBEE_HUM_MAX_VALUE   10000
+
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
+
+/* Reportable attributes: temperature + humidity + battery voltage + battery percentage */
+#define FROSTBEE_REPORT_ATTR_COUNT     \
+	(ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT + \
+	 ZB_ZCL_REL_HUMIDITY_MEASUREMENT_REPORT_ATTR_COUNT + \
+	 2)
+
+struct zb_device_ctx {
+	zb_zcl_basic_attrs_ext_t basic_attr;
+	zb_zcl_identify_attrs_t identify_attr;
+	zb_uint8_t battery_voltage;
+	zb_uint8_t battery_percentage;
+	zb_int16_t temp_measure_value;
+	zb_int16_t temp_min_value;
+	zb_int16_t temp_max_value;
+	zb_uint16_t temp_tolerance;
+	zb_uint16_t hum_measure_value;
+	zb_uint16_t hum_min_value;
+	zb_uint16_t hum_max_value;
+};
+
+static struct zb_device_ctx dev_ctx;
 
 static const struct device *sht = DEVICE_DT_GET(DT_NODELABEL(sht40));
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
@@ -56,10 +90,8 @@ static bool button_pressed_state;
 static atomic_t long_press_handled;
 #endif
 
-static struct k_work_delayable measure_work;
-static atomic_t force_measure_now;
-static uint32_t periodic_tick;
 static K_MUTEX_DEFINE(sensor_mutex);
+static bool zigbee_network_ready;
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -77,6 +109,135 @@ static struct adc_sequence adc_seq = {
 	.resolution = ADC_RESOLUTION,
 };
 
+ZB_ZCL_DECLARE_BASIC_ATTRIB_LIST_EXT(
+	basic_attr_list,
+	&dev_ctx.basic_attr.zcl_version,
+	&dev_ctx.basic_attr.app_version,
+	&dev_ctx.basic_attr.stack_version,
+	&dev_ctx.basic_attr.hw_version,
+	dev_ctx.basic_attr.mf_name,
+	dev_ctx.basic_attr.model_id,
+	dev_ctx.basic_attr.date_code,
+	&dev_ctx.basic_attr.power_source,
+	dev_ctx.basic_attr.location_id,
+	&dev_ctx.basic_attr.ph_env,
+	dev_ctx.basic_attr.sw_ver);
+
+ZB_ZCL_DECLARE_IDENTIFY_CLIENT_ATTRIB_LIST(identify_client_attr_list);
+ZB_ZCL_DECLARE_IDENTIFY_SERVER_ATTRIB_LIST(identify_server_attr_list, &dev_ctx.identify_attr.identify_time);
+
+static zb_zcl_attr_t power_config_attr_list[] = {
+	{
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+		ZB_ZCL_ATTR_TYPE_U8,
+		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
+		(void *)&dev_ctx.battery_voltage
+	},
+	{
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+		ZB_ZCL_ATTR_TYPE_U8,
+		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
+		(void *)&dev_ctx.battery_percentage
+	},
+	{
+		ZB_ZCL_NULL_ID,
+		0,
+		0,
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
+		NULL
+	}
+};
+
+ZB_ZCL_DECLARE_TEMP_MEASUREMENT_ATTRIB_LIST(
+	temp_measurement_attr_list,
+	&dev_ctx.temp_measure_value,
+	&dev_ctx.temp_min_value,
+	&dev_ctx.temp_max_value,
+	&dev_ctx.temp_tolerance);
+
+ZB_ZCL_DECLARE_REL_HUMIDITY_MEASUREMENT_ATTRIB_LIST(
+	humidity_attr_list,
+	&dev_ctx.hum_measure_value,
+	&dev_ctx.hum_min_value,
+	&dev_ctx.hum_max_value);
+
+static zb_zcl_cluster_desc_t frostbee_clusters[] = {
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_BASIC,
+		ZB_ZCL_ARRAY_SIZE(basic_attr_list, zb_zcl_attr_t),
+		basic_attr_list,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_IDENTIFY,
+		ZB_ZCL_ARRAY_SIZE(identify_server_attr_list, zb_zcl_attr_t),
+		identify_server_attr_list,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ARRAY_SIZE(power_config_attr_list, zb_zcl_attr_t),
+		power_config_attr_list,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_ARRAY_SIZE(temp_measurement_attr_list, zb_zcl_attr_t),
+		temp_measurement_attr_list,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_ARRAY_SIZE(humidity_attr_list, zb_zcl_attr_t),
+		humidity_attr_list,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+	ZB_ZCL_CLUSTER_DESC(
+		ZB_ZCL_CLUSTER_ID_IDENTIFY,
+		ZB_ZCL_ARRAY_SIZE(identify_client_attr_list, zb_zcl_attr_t),
+		identify_client_attr_list,
+		ZB_ZCL_CLUSTER_CLIENT_ROLE,
+		ZB_ZCL_MANUF_CODE_INVALID),
+};
+
+ZB_DECLARE_SIMPLE_DESC(5, 1);
+ZB_AF_SIMPLE_DESC_TYPE(5, 1) simple_desc_frostbee_ep = {
+	FROSTBEE_ENDPOINT,
+	ZB_AF_HA_PROFILE_ID,
+	ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
+	0,
+	0,
+	5,
+	1,
+	{
+		ZB_ZCL_CLUSTER_ID_BASIC,
+		ZB_ZCL_CLUSTER_ID_IDENTIFY,
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_CLUSTER_ID_IDENTIFY,
+	}
+};
+
+ZBOSS_DEVICE_DECLARE_REPORTING_CTX(reporting_info_frostbee, FROSTBEE_REPORT_ATTR_COUNT);
+ZB_AF_DECLARE_ENDPOINT_DESC(
+	frostbee_ep,
+	FROSTBEE_ENDPOINT,
+	ZB_AF_HA_PROFILE_ID,
+	0,
+	NULL,
+	ZB_ZCL_ARRAY_SIZE(frostbee_clusters, zb_zcl_cluster_desc_t),
+	frostbee_clusters,
+	(zb_af_simple_desc_1_1_t *)&simple_desc_frostbee_ep,
+	FROSTBEE_REPORT_ATTR_COUNT,
+	reporting_info_frostbee,
+	0,
+	NULL);
+
+ZBOSS_DECLARE_DEVICE_CTX_1_EP(frostbee_ctx, frostbee_ep);
+
 static int compare_int16(const void *a, const void *b)
 {
 	return (*(int16_t *)a - *(int16_t *)b);
@@ -85,78 +246,88 @@ static int compare_int16(const void *a, const void *b)
 static void log_fixed2(const char *label, int32_t value)
 {
 	int32_t abs_value = value < 0 ? -value : value;
-	LOG_INF("%s: %s%d.%02d", label, value < 0 ? "-" : "",
-		abs_value / 100, abs_value % 100);
+	LOG_INF("%s: %s%d.%02d", label, value < 0 ? "-" : "", abs_value / 100, abs_value % 100);
 }
 
-static void read_sensor_once(void)
+static void clusters_attr_init(void)
+{
+	dev_ctx.basic_attr.zcl_version = ZB_ZCL_VERSION;
+	dev_ctx.basic_attr.app_version = 1;
+	dev_ctx.basic_attr.stack_version = 1;
+	dev_ctx.basic_attr.hw_version = 1;
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_UF2", 7);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260304", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, "uf2-zb0", 7);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
+	dev_ctx.basic_attr.power_source = ZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
+	dev_ctx.basic_attr.ph_env = ZB_ZCL_BASIC_ENV_UNSPECIFIED;
+
+	dev_ctx.identify_attr.identify_time = ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
+
+	dev_ctx.battery_voltage = 45;
+	dev_ctx.battery_percentage = 200;
+	dev_ctx.temp_measure_value = ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN;
+	dev_ctx.temp_min_value = FROSTBEE_TEMP_MIN_VALUE;
+	dev_ctx.temp_max_value = FROSTBEE_TEMP_MAX_VALUE;
+	dev_ctx.temp_tolerance = 20;
+	dev_ctx.hum_measure_value = ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_UNKNOWN;
+	dev_ctx.hum_min_value = FROSTBEE_HUM_MIN_VALUE;
+	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
+}
+
+static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
 {
 	struct sensor_value temp;
 	struct sensor_value hum;
 	int ret;
 	int64_t temp_micro;
 	int64_t hum_micro;
-	int32_t temp_centi;
-	int32_t hum_centi;
 
 	if (!device_is_ready(sht)) {
-		LOG_ERR("SHT4X not ready");
-		return;
+		return -ENODEV;
 	}
-
-	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
 	ret = sensor_sample_fetch(sht);
 	if (ret < 0) {
-		LOG_ERR("sensor_sample_fetch failed: %d", ret);
-		k_mutex_unlock(&sensor_mutex);
-		return;
+		return ret;
 	}
 
 	ret = sensor_channel_get(sht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
 	if (ret < 0) {
-		LOG_ERR("TEMP channel read failed: %d", ret);
-		k_mutex_unlock(&sensor_mutex);
-		return;
+		return ret;
 	}
 
 	ret = sensor_channel_get(sht, SENSOR_CHAN_HUMIDITY, &hum);
 	if (ret < 0) {
-		LOG_ERR("HUM channel read failed: %d", ret);
-		k_mutex_unlock(&sensor_mutex);
-		return;
+		return ret;
 	}
-
-	k_mutex_unlock(&sensor_mutex);
 
 	temp_micro = (int64_t)temp.val1 * 1000000LL + temp.val2;
 	hum_micro = (int64_t)hum.val1 * 1000000LL + hum.val2;
-	temp_centi = (int32_t)(temp_micro / 10000);
-	hum_centi = (int32_t)(hum_micro / 10000);
+	*temp_centi = (zb_int16_t)(temp_micro / 10000);
+	*hum_centi = (zb_uint16_t)(hum_micro / 10000);
 
-	log_fixed2("Temperature [C]", temp_centi);
-	log_fixed2("Humidity [%]", hum_centi);
+	log_fixed2("Temperature [C]", *temp_centi);
+	log_fixed2("Humidity [%]", *hum_centi);
+	return 0;
 }
 
-static void read_battery_once(void)
+static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zcl)
 {
 	int ret;
 	int16_t samples[5];
 	int32_t adc_mv;
 	int32_t battery_mv;
 	int32_t percentage_raw;
-	uint8_t battery_zcl;
-	uint8_t battery_pct;
 
 	if (!device_is_ready(adc_dev)) {
-		LOG_ERR("ADC device not ready");
-		return;
+		return -ENODEV;
 	}
 
 	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_OUTPUT_ACTIVE);
 	if (ret < 0) {
-		LOG_ERR("Failed to enable voltage divider: %d", ret);
-		return;
+		return ret;
 	}
 
 	k_msleep(2);
@@ -164,9 +335,8 @@ static void read_battery_once(void)
 	for (int i = 0; i < 5; i++) {
 		ret = adc_read(adc_dev, &adc_seq);
 		if (ret < 0) {
-			LOG_ERR("ADC read %d failed: %d", i, ret);
 			gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
-			return;
+			return ret;
 		}
 
 		samples[i] = adc_sample_buffer;
@@ -182,7 +352,7 @@ static void read_battery_once(void)
 	adc_mv = ((int32_t)(samples[1] + samples[2] + samples[3]) / 3);
 	adc_mv = (adc_mv * ADC_VREF_MV * ADC_GAIN_FACTOR) / 4095;
 	battery_mv = adc_mv * VDIV_FACTOR;
-	battery_zcl = (uint8_t)((battery_mv + 50) / 100);
+	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
 	percentage_raw = ((battery_mv - 3000) * 200) / 1500;
 	if (percentage_raw < 0) {
@@ -191,36 +361,96 @@ static void read_battery_once(void)
 	if (percentage_raw > 200) {
 		percentage_raw = 200;
 	}
-	battery_pct = (uint8_t)percentage_raw;
+	*battery_pct_zcl = (zb_uint8_t)percentage_raw;
 
 	LOG_INF("Battery: %d mV (ZCL=%u), %u%% (ZCL=%u)",
-		battery_mv, battery_zcl, battery_pct / 2, battery_pct);
+		battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
+
+	return 0;
 }
 
-static void measure_work_handler(struct k_work *work)
+static void measurement_update(zb_bool_t force_report)
 {
-	bool force = atomic_get(&force_measure_now) != 0;
+	zb_int16_t temp_centi;
+	zb_uint16_t hum_centi;
+	zb_uint8_t battery_zcl;
+	zb_uint8_t battery_pct_zcl;
+	int ret;
 
-	ARG_UNUSED(work);
+	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
-	if (force) {
-		atomic_set(&force_measure_now, 0);
-		LOG_INF("Forced measurement triggered by button");
-		read_sensor_once();
-		read_battery_once();
-		/* Keep periodic loop alive after ad-hoc button-triggered reads. */
-		k_work_schedule(&measure_work, K_SECONDS(SENSOR_READ_INTERVAL_S));
+	ret = read_sensor_once(&temp_centi, &hum_centi);
+	if (ret < 0) {
+		LOG_ERR("Sensor read failed: %d", ret);
+		k_mutex_unlock(&sensor_mutex);
 		return;
 	}
 
-	if (periodic_tick == 0U || (periodic_tick % BATTERY_TICK_DIV) == 0U) {
-		read_battery_once();
+	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
+	if (ret < 0) {
+		LOG_ERR("Battery read failed: %d", ret);
+		k_mutex_unlock(&sensor_mutex);
+		return;
 	}
 
-	read_sensor_once();
-	periodic_tick++;
+	dev_ctx.temp_measure_value = temp_centi;
+	dev_ctx.hum_measure_value = hum_centi;
+	dev_ctx.battery_voltage = battery_zcl;
+	dev_ctx.battery_percentage = battery_pct_zcl;
 
-	k_work_schedule(&measure_work, K_SECONDS(SENSOR_READ_INTERVAL_S));
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+		(zb_uint8_t *)&dev_ctx.temp_measure_value,
+		force_report);
+
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
+		(zb_uint8_t *)&dev_ctx.hum_measure_value,
+		force_report);
+
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+		(zb_uint8_t *)&dev_ctx.battery_voltage,
+		force_report);
+
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+		(zb_uint8_t *)&dev_ctx.battery_percentage,
+		force_report);
+
+	k_mutex_unlock(&sensor_mutex);
+}
+
+static void measurement_now_cb(zb_uint8_t param)
+{
+	ARG_UNUSED(param);
+	measurement_update(ZB_TRUE);
+}
+
+static void schedule_next_periodic(void)
+{
+	ZB_SCHEDULE_APP_ALARM(measurement_now_cb, 0,
+			      (zb_time_t)REPORT_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+}
+
+static void measurement_periodic(zb_bufid_t bufid)
+{
+	ARG_UNUSED(bufid);
+	measurement_update(ZB_TRUE);
+	schedule_next_periodic();
 }
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
@@ -230,7 +460,7 @@ static void long_press_handler(struct k_work *work)
 
 	if (gpio_pin_get_dt(&reset_button) == 1) {
 		atomic_set(&long_press_handled, 1);
-		LOG_WRN("Button held >= 5s. Factory reset disabled in UF2 battlefield app.");
+		LOG_WRN("Button held >= 5s. Factory reset disabled in UF2 Zigbee app.");
 	}
 }
 
@@ -263,9 +493,12 @@ static void debounce_handler(struct k_work *work)
 	}
 
 	if ((k_uptime_get() - button_press_time) < BUTTON_SHORT_PRESS_MAX_MS) {
-		atomic_set(&force_measure_now, 1);
-		k_work_reschedule(&measure_work, K_NO_WAIT);
-		LOG_INF("Short press: forced sensor + battery read");
+		if (zigbee_network_ready) {
+			LOG_INF("Short press: forced report");
+			ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
+		} else {
+			LOG_INF("Short press: ignored (not joined yet)");
+		}
 	} else {
 		LOG_INF("Button released (no action)");
 	}
@@ -338,30 +571,77 @@ static void try_enable_usb_logs(void)
 	}
 }
 
+void zboss_signal_handler(zb_bufid_t bufid)
+{
+	zb_zdo_app_signal_hdr_t *sig_hndler = NULL;
+	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
+	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
+
+	switch (sig) {
+	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
+	case ZB_BDB_SIGNAL_STEERING:
+		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+		if (status == RET_OK) {
+			zigbee_network_ready = true;
+			LOG_INF("Zigbee joined/rejoined (signal=%d), periodic reports each %ds",
+				sig, REPORT_INTERVAL_S);
+			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
+			ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+		} else {
+			LOG_WRN("Zigbee signal %d status=%d", sig, status);
+		}
+		break;
+
+	case ZB_ZDO_SIGNAL_LEAVE:
+		zigbee_network_ready = false;
+		LOG_WRN("Zigbee leave signal");
+		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+		break;
+
+	default:
+		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
+		break;
+	}
+
+	if (bufid) {
+		zb_buf_free(bufid);
+	}
+}
+
 int main(void)
 {
 	int ret;
 
-	LOG_INF("Frostbee UF2 battlefield app boot");
+	LOG_INF("Frostbee UF2 Zigbee battlefield boot");
 
 	try_enable_usb_logs();
 
 	if (!device_is_ready(adc_dev)) {
 		LOG_ERR("ADC not ready");
+		return -ENODEV;
 	}
 
 	if (!gpio_is_ready_dt(&vbat_enable)) {
 		LOG_ERR("VBAT enable GPIO not ready");
-	} else {
-		ret = gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
-		if (ret < 0) {
-			LOG_ERR("Failed to set VBAT enable pin idle: %d", ret);
-		}
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
+	if (ret < 0) {
+		LOG_ERR("Failed to set VBAT enable pin idle: %d", ret);
+		return ret;
 	}
 
 	ret = adc_channel_setup(adc_dev, &adc_cfg);
 	if (ret < 0) {
 		LOG_ERR("ADC channel setup failed: %d", ret);
+		return ret;
+	}
+
+	if (!device_is_ready(sht)) {
+		LOG_ERR("SHT4X not ready");
+		return -ENODEV;
 	}
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
@@ -371,8 +651,16 @@ int main(void)
 	}
 #endif
 
-	k_work_init_delayable(&measure_work, measure_work_handler);
-	k_work_schedule(&measure_work, K_NO_WAIT);
+	clusters_attr_init();
+
+	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
+	zb_set_keepalive_timeout((zb_time_t)64 * 60 * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+	zigbee_configure_sleepy_behavior(true);
+
+	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
+	zigbee_enable();
+
+	LOG_INF("Zigbee enabled (Z2M focus, %ds reporting)", REPORT_INTERVAL_S);
 
 	while (1) {
 		k_sleep(K_SECONDS(60));

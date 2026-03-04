@@ -6,6 +6,7 @@ This is the execution checklist from current UF2 battlefield testing to producti
 - Keep this file as the working checklist (status + notes).
 - Keep `AGENTS.md` as stable context/policy.
 - Only mark items done when validated on real hardware.
+- `app_uf2` is the implementation source-of-truth for all phases in this roadmap; `app/` is a downstream production port target only.
 
 ## Phase 0: UF2 Baseline (Current)
 - [x] UF2 app boots reliably and logs over USB (`screen`).
@@ -37,7 +38,7 @@ Exit criteria:
 - [ ] Sleepy End Device behavior works as intended.
 - [ ] Reporting cadence and attribute updates are reliable.
 - [ ] Keep USB logs clean and actionable during Zigbee operation.
-- [ ] Validate behavior with both Z2M and ZHA (at least smoke tests).
+- [ ] Validate behavior with Z2M (smoke tests).
 
 Exit criteria:
 - stable join/rejoin/sleep/reporting in repeated cycles
@@ -70,8 +71,9 @@ Exit criteria:
 - [ ] Cold boot + warm reset
 - [ ] Short run + long run
 - [ ] Good RF + weak RF
-- [ ] Z2M + ZHA smoke coverage
+- [ ] Z2M smoke coverage
 
 ## Notes
 - Some items are intentionally deferred until ST-Link + production bootloader flow.
 - `app_uf2` is for speed and observability; final power profile must be validated on production settings.
+- Do not treat `app/` as implementation source-of-truth for any `app_uf2` work; build and validate behavior in `app_uf2` first, then port proven logic into `app/`.
