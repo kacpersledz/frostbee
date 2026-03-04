@@ -29,3 +29,4 @@
 - Prefer small, testable changes in `app_uf2/`.
 - Keep logs explicit (what was measured, when, and why).
 - When uncertain, optimize for observability and determinism over feature breadth.
+- Execution checklist and phase status are tracked in `ROADMAP_UF2_TO_OTA.md`.
