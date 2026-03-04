@@ -14,17 +14,17 @@ This is the execution checklist from current UF2 battlefield testing to producti
 - [x] Button short press triggers forced read.
 - [x] Button long press path is deterministic (no reset side effects).
 - [x] Fixed bug where periodic loop stopped after forced read.
-- [ ] 6-12h continuous run with no stalls/resets.
-- [ ] Power-cycle stress test (20+ cycles) with expected startup behavior.
+- [ ] Deferred: 6-12h continuous run with no stalls/resets.
+- [ ] Deferred: Power-cycle stress test (20+ cycles) with expected startup behavior.
 
 ## Phase 1: Harden Non-Zigbee App Logic in `app_uf2`
-- [ ] Add runtime counters (successful reads, failed reads, button events, uptime snapshots).
-- [ ] Add fault injection checks:
-- sensor disconnect/reconnect recovery
-- I2C error recovery without reboot
-- [ ] Validate button threshold boundaries around short/long cutoffs.
-- [ ] Confirm battery measurement noise bounds and averaging strategy.
-- [ ] Freeze a "known good" baseline tag/commit.
+- [x] Add runtime counters (successful reads, failed reads, button events, uptime snapshots).
+- [x] Add fault injection checks:
+  - sensor disconnect/reconnect recovery
+  - I2C error recovery without reboot
+- [x] Validate button threshold boundaries around short/long cutoffs.
+- [x] Confirm battery measurement noise bounds and averaging strategy.
+- [x] Freeze a "known good" baseline tag/commit.
 
 Exit criteria:
 - repeatable behavior over long run and fault/recovery tests
