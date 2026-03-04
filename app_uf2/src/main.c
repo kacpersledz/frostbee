@@ -24,12 +24,14 @@
 #include <zboss_api_addons.h>
 #include <zigbee/zigbee_app_utils.h>
 #include <zigbee/zigbee_error_handler.h>
+#include <zb_nrf_platform.h>
 
 LOG_MODULE_REGISTER(frostbee_uf2, LOG_LEVEL_DBG);
 
 /* Zigbee + reporting */
 #define FROSTBEE_ENDPOINT      1
 #define REPORT_INTERVAL_S      15
+#define SED_KEEPALIVE_MS       3000
 
 /* Button timing */
 #define BUTTON_DEBOUNCE_MS         100
@@ -92,6 +94,10 @@ static atomic_t long_press_handled;
 
 static K_MUTEX_DEFINE(sensor_mutex);
 static bool zigbee_network_ready;
+static uint32_t forced_reports_requested;
+static uint32_t forced_reports_attempted;
+static uint32_t forced_reports_completed;
+static uint32_t forced_reports_failed;
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -377,11 +383,18 @@ static void measurement_update(zb_bool_t force_report)
 	zb_uint8_t battery_pct_zcl;
 	int ret;
 
+	if (force_report) {
+		forced_reports_attempted++;
+	}
+
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
 	ret = read_sensor_once(&temp_centi, &hum_centi);
 	if (ret < 0) {
 		LOG_ERR("Sensor read failed: %d", ret);
+		if (force_report) {
+			forced_reports_failed++;
+		}
 		k_mutex_unlock(&sensor_mutex);
 		return;
 	}
@@ -389,6 +402,9 @@ static void measurement_update(zb_bool_t force_report)
 	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
 	if (ret < 0) {
 		LOG_ERR("Battery read failed: %d", ret);
+		if (force_report) {
+			forced_reports_failed++;
+		}
 		k_mutex_unlock(&sensor_mutex);
 		return;
 	}
@@ -430,6 +446,15 @@ static void measurement_update(zb_bool_t force_report)
 		(zb_uint8_t *)&dev_ctx.battery_percentage,
 		force_report);
 
+	if (force_report) {
+		forced_reports_completed++;
+		LOG_INF("Forced report counters: requested=%u attempted=%u completed=%u failed=%u",
+			forced_reports_requested,
+			forced_reports_attempted,
+			forced_reports_completed,
+			forced_reports_failed);
+	}
+
 	k_mutex_unlock(&sensor_mutex);
 }
 
@@ -439,18 +464,13 @@ static void measurement_now_cb(zb_uint8_t param)
 	measurement_update(ZB_TRUE);
 }
 
-static void schedule_next_periodic(void)
-{
-	ZB_SCHEDULE_APP_ALARM(measurement_now_cb, 0,
-			      (zb_time_t)REPORT_INTERVAL_S *
-			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
-}
-
 static void measurement_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
-	measurement_update(ZB_TRUE);
-	schedule_next_periodic();
+	measurement_update(ZB_FALSE);
+	ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+			      (zb_time_t)REPORT_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
@@ -495,6 +515,7 @@ static void debounce_handler(struct k_work *work)
 	if ((k_uptime_get() - button_press_time) < BUTTON_SHORT_PRESS_MAX_MS) {
 		if (zigbee_network_ready) {
 			LOG_INF("Short press: forced report");
+			forced_reports_requested++;
 			ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
 		} else {
 			LOG_INF("Short press: ignored (not joined yet)");
@@ -583,10 +604,12 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
 			zigbee_network_ready = true;
-			LOG_INF("Zigbee joined/rejoined (signal=%d), periodic reports each %ds",
+			LOG_INF("Zigbee joined/rejoined (signal=%d), reporting each %ds",
 				sig, REPORT_INTERVAL_S);
 			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
+			measurement_update(ZB_FALSE);
 			ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+					      (zb_time_t)REPORT_INTERVAL_S *
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 		} else {
 			LOG_WRN("Zigbee signal %d status=%d", sig, status);
@@ -654,7 +677,8 @@ int main(void)
 	clusters_attr_init();
 
 	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
-	zb_set_keepalive_timeout((zb_time_t)64 * 60 * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+	/* Keepalive follows sample-like value during bring-up to keep interview stable. */
+	zb_set_keepalive_timeout(ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
 	zigbee_configure_sleepy_behavior(true);
 
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);

@@ -1,0 +1,47 @@
+# Frostbee UF2 Zigbee layout (nRF52840, 1 MB flash)
+#
+# Keep compatibility with Adafruit UF2 bootloader flow:
+# - App start offset: 0x26000
+# - Reserve top flash for UF2 bootloader/settings (0xF4000-0x100000)
+#
+# Layout:
+#   0x000000 - 0x001000  nrf5_mbr
+#   0x001000 - 0x026000  uf2_softdevice_reserved
+#   0x026000 - 0x0EB000  app (dynamic)
+#   0x0EB000 - 0x0F3000  zboss_nvram
+#   0x0F3000 - 0x0F4000  zboss_product_config
+#   0x0F4000 - 0x100000  uf2_bootloader_reserved
+
+nrf5_mbr:
+  address: 0x0
+  region: flash_primary
+  size: 0x1000
+
+uf2_softdevice_reserved:
+  address: 0x1000
+  region: flash_primary
+  size: 0x25000
+
+zboss_nvram:
+  address: 0xeb000
+  region: flash_primary
+  size: 0x8000
+  placement:
+    before:
+      - zboss_product_config
+
+zboss_product_config:
+  address: 0xf3000
+  region: flash_primary
+  size: 0x1000
+  placement:
+    before:
+      - uf2_bootloader_reserved
+
+uf2_bootloader_reserved:
+  address: 0xf4000
+  region: flash_primary
+  size: 0xc000
+  placement:
+    before:
+      - end
