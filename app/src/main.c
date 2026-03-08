@@ -429,13 +429,22 @@ static void measurement_periodic(zb_bufid_t bufid)
 }
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
+static void do_factory_reset(zb_uint8_t param)
+{
+	ARG_UNUSED(param);
+
+	LOG_WRN("Factory reset requested, leaving network and erasing NVRAM");
+	zb_bdb_reset_via_local_action(param);
+}
+
 static void long_press_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	if (gpio_pin_get_dt(&reset_button) == 1) {
 		atomic_set(&long_press_handled, 1);
-		LOG_WRN("Button held >= 5s. Factory reset/OTA path deferred in production app.");
+		LOG_WRN("Button held >= 5s, scheduling factory reset");
+		ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
 	}
 }
 
@@ -514,6 +523,10 @@ static int button_init(void)
 	k_work_init_delayable(&long_press_work, long_press_handler);
 
 	button_pressed_state = gpio_pin_get_dt(&reset_button);
+	if (button_pressed_state) {
+		atomic_set(&long_press_handled, 1);
+		LOG_INF("Button held on boot, waiting for release");
+	}
 	return 0;
 }
 #endif
