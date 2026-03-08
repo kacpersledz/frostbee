@@ -1,22 +1,23 @@
 /*
  * Frostbee - Zigbee Temperature & Humidity Sensor
  *
- * nRF52840 Dongle + Sensirion SHT40 via I2C
- * Zigbee Sleepy End Device with ZCL clusters:
- *   - Basic, Identify, Power Configuration
- *   - Temperature Measurement, Relative Humidity
+ * Production app ported from validated app_uf2 Zigbee SED baseline.
+ * OTA-specific behavior stays out of the runtime path until revalidated.
  *
  * SPDX-License-Identifier: MIT
  */
 
-#include <zephyr/kernel.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
-#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
-#include <ram_pwrdn.h>
+#include <zephyr/usb/usb_device.h>
 #include <zephyr/dfu/mcuboot.h>
 
 #if __has_include(<app_version.h>)
@@ -33,82 +34,46 @@
 #include <zigbee/zigbee_fota.h>
 #include <zb_nrf_platform.h>
 
-/* The zigbee_fota library declares this endpoint internally but doesn't
- * export it in the header. We need it for ZBOSS_DECLARE_DEVICE_CTX_2_EP.
- */
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+/* The zigbee_fota library exposes its endpoint from the implementation. */
 extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
+#endif
+
 #include "zb_mem_config_custom.h"
 #include "zb_frostbee.h"
 
-LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_DBG);
 
-/* Forward declarations */
-static void sensor_periodic(zb_bufid_t bufid);
-static void battery_periodic(zb_bufid_t bufid);
-static void sensor_read(zb_bool_t force_report);
-static void battery_read(zb_bool_t force_report);
-static void sensor_and_battery_read(zb_bool_t force_report);
-static void sensor_and_battery_read_cb(zb_uint8_t param);
+#define REPORT_INTERVAL_S      15
+#define SED_KEEPALIVE_MS       3000
 
-/* Measurement intervals in seconds (used for ZBOSS alarm scheduling). */
-#define SENSOR_READ_INTERVAL_S   600    /* 10 minutes - temp/humidity */
-#define BATTERY_READ_INTERVAL_S  64800  /* 18 hours - aligned with ZCL max reporting interval */
+#define BUTTON_DEBOUNCE_MS         100
+#define BUTTON_SHORT_PRESS_MAX_MS  1000
+#define BUTTON_FACTORY_RESET_MS    5000
 
-/* Reset button timing (milliseconds) */
-#define BUTTON_DEBOUNCE_MS         100    /* Ignore edges within this window */
-#define BUTTON_SHORT_PRESS_MAX_MS  1000   /* < 1s = short press (force sensor read) */
-#define BUTTON_FACTORY_RESET_MS    5000   /* >= 5s = factory reset */
-#define BUTTON_WAKE_DURATION_S     60     /* Stay awake after short press for OTA (handy for update testing) */
+#define ADC_NODE        DT_NODELABEL(adc)
+#define ADC_CHANNEL_ID  5
+#define ADC_RESOLUTION  12
+#define ADC_VREF_MV     600
+#define ADC_GAIN_FACTOR 6
+#define VDIV_FACTOR     2
 
-/* Reset button GPIO */
-#define RESET_BUTTON_NODE DT_ALIAS(sw0)
-
-/* Zigbee network persistence:
- * By default, network data is kept across reboots (no rejoin needed).
- * Factory reset (5s button press) triggers NVRAM erase on next boot.
- * The erase flag is stored in settings subsystem and survives reboot.
- */
-
-/* Basic cluster metadata */
-#define FROSTBEE_INIT_BASIC_APP_VERSION    1
-#define FROSTBEE_INIT_BASIC_STACK_VERSION  10
-#define FROSTBEE_INIT_BASIC_HW_VERSION     1
-#define FROSTBEE_INIT_BASIC_MANUF_NAME     "Frostbee"
-#define FROSTBEE_INIT_BASIC_MODEL_ID       "FBE_TH_1"
-#define FROSTBEE_INIT_BASIC_DATE_CODE      "20250201"
-#define FROSTBEE_INIT_BASIC_LOCATION_DESC  ""
-#define FROSTBEE_INIT_BASIC_PH_ENV         ZB_ZCL_BASIC_ENV_UNSPECIFIED
-
-/* Temperature measurement range: -40.00 C to +125.00 C (SHT40 spec) */
 #define FROSTBEE_TEMP_MIN_VALUE  (-4000)
 #define FROSTBEE_TEMP_MAX_VALUE  12500
-
-/* Humidity measurement range: 0.00% to 100.00% */
 #define FROSTBEE_HUM_MIN_VALUE   0
 #define FROSTBEE_HUM_MAX_VALUE   10000
 
-/* ─── Device context (ZCL attribute storage) ─── */
+#define RESET_BUTTON_NODE DT_ALIAS(sw0)
 
 struct zb_device_ctx {
 	zb_zcl_basic_attrs_ext_t basic_attr;
-	zb_zcl_identify_attrs_t  identify_attr;
-
-	/* Power configuration */
+	zb_zcl_identify_attrs_t identify_attr;
 	zb_uint8_t battery_voltage;
 	zb_uint8_t battery_percentage;
-	zb_uint8_t battery_size;
-	zb_uint8_t battery_quantity;
-	zb_uint8_t battery_rated_voltage;
-	zb_uint8_t battery_alarm_mask;
-	zb_uint8_t battery_voltage_min_threshold;
-
-	/* Temperature measurement */
-	zb_int16_t  temp_measure_value;
-	zb_int16_t  temp_min_value;
-	zb_int16_t  temp_max_value;
+	zb_int16_t temp_measure_value;
+	zb_int16_t temp_min_value;
+	zb_int16_t temp_max_value;
 	zb_uint16_t temp_tolerance;
-
-	/* Humidity measurement */
 	zb_uint16_t hum_measure_value;
 	zb_uint16_t hum_min_value;
 	zb_uint16_t hum_max_value;
@@ -116,199 +81,43 @@ struct zb_device_ctx {
 
 static struct zb_device_ctx dev_ctx;
 
-/* Sensor device handle */
-static const struct device *sht;
+static const struct device *sht = DEVICE_DT_GET(DT_NODELABEL(sht40));
+static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
+static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_en), gpios);
 
-/* ─── Battery voltage measurement ─── */
+#if DT_NODE_EXISTS(RESET_BUTTON_NODE)
+static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
+static struct gpio_callback button_cb_data;
+static struct k_work_delayable debounce_work;
+static struct k_work_delayable long_press_work;
+static int64_t button_press_time;
+static bool button_pressed_state;
+static atomic_t long_press_handled;
+#endif
 
-/* ADC configuration for P0.29 (AIN5) */
-#define ADC_NODE        DT_NODELABEL(adc)
-#define ADC_CHANNEL_ID  5
-#define ADC_RESOLUTION  12
-#define ADC_VREF_MV     600   /* Internal reference: 0.6V */
-#define ADC_GAIN_FACTOR 6     /* Gain 1/6 means multiply by 6 */
-
-/* Voltage divider: R1=10kΩ, R2=10kΩ (divides by 2) */
-#define VDIV_FACTOR     2
-
-static const struct device *adc_dev;
+static K_MUTEX_DEFINE(sensor_mutex);
+static bool zigbee_network_ready;
+static bool ota_in_progress;
+static uint32_t forced_reports_requested;
+static uint32_t forced_reports_attempted;
+static uint32_t forced_reports_completed;
+static uint32_t forced_reports_failed;
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
 	.reference = ADC_REF_INTERNAL,
 	.acquisition_time = ADC_ACQ_TIME_DEFAULT,
 	.channel_id = ADC_CHANNEL_ID,
-	.input_positive = SAADC_CH_PSELP_PSELP_AnalogInput5,  /* AIN5 = P0.29 */
+	.input_positive = SAADC_CH_PSELP_PSELP_AnalogInput5,
 };
 
 static int16_t adc_sample_buffer;
-
 static struct adc_sequence adc_seq = {
 	.channels = BIT(ADC_CHANNEL_ID),
 	.buffer = &adc_sample_buffer,
 	.buffer_size = sizeof(adc_sample_buffer),
 	.resolution = ADC_RESOLUTION,
 };
-
-/* GPIO to enable voltage divider (P0.02) - active LOW = connected to GND */
-static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_en), gpios);
-
-/* Mutex to protect sensor access from concurrent reads */
-static K_MUTEX_DEFINE(sensor_mutex);
-
-/* OTA state (used by button wake logic and FOTA handler) */
-static bool ota_in_progress;
-
-/* Reset button */
-#if DT_NODE_EXISTS(RESET_BUTTON_NODE)
-static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
-static struct gpio_callback button_cb_data;
-static int64_t button_press_time;
-static bool button_pressed_state;  /* Track logical state */
-static atomic_t long_press_handled; /* Already triggered factory reset */
-static struct k_work_delayable debounce_work;
-static struct k_work_delayable factory_reset_work;
-static struct k_work_delayable wake_timeout_work;
-
-static void wake_timeout_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (ota_in_progress) {
-		LOG_INF("Wake timeout - OTA in progress, staying awake");
-		return;
-	}
-	zigbee_configure_sleepy_behavior(true);
-	LOG_INF("Wake timeout - sleep re-enabled");
-}
-
-static void do_factory_reset(zb_uint8_t param)
-{
-	ARG_UNUSED(param);
-
-	LOG_WRN("Factory reset - leaving network and erasing NVRAM");
-	/* This function leaves the network, erases NVRAM, and reboots.
-	 * It's called from ZBOSS context via ZB_SCHEDULE_APP_CALLBACK.
-	 */
-	zb_bdb_reset_via_local_action(param);
-	/* Note: zb_bdb_reset_via_local_action will trigger a reboot internally */
-}
-
-static void factory_reset_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	/* Check if button is still held */
-	if (gpio_pin_get_dt(&reset_button) == 1) {
-		atomic_set(&long_press_handled, 1);
-		/* Schedule factory reset in ZBOSS context */
-		ZB_SCHEDULE_APP_CALLBACK(do_factory_reset, 0);
-	}
-}
-
-static void debounce_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	/* Read the settled state after debounce period */
-	int pressed = gpio_pin_get_dt(&reset_button);
-
-	/* Only act if state actually changed */
-	if (pressed == button_pressed_state) {
-		return;
-	}
-	button_pressed_state = pressed;
-
-	if (pressed) {
-		/* Button pressed - record time and schedule factory reset check */
-		button_press_time = k_uptime_get();
-		atomic_set(&long_press_handled, 0);
-		k_work_schedule(&factory_reset_work, K_MSEC(BUTTON_FACTORY_RESET_MS));
-		LOG_INF("Button pressed - hold 5s for factory reset");
-	} else {
-		/* Button released - cancel factory reset, check for short press */
-		k_work_cancel_delayable(&factory_reset_work);
-
-		if (atomic_get(&long_press_handled)) {
-			LOG_INF("Button released (monitoring now active)");
-			atomic_set(&long_press_handled, 0);  /* Ready for next press */
-		} else {
-			int64_t hold_time = k_uptime_get() - button_press_time;
-
-			if (hold_time < BUTTON_SHORT_PRESS_MAX_MS) {
-				LOG_INF("Short press - sensor read + awake %ds for OTA",
-					BUTTON_WAKE_DURATION_S);
-				ZB_SCHEDULE_APP_CALLBACK(sensor_and_battery_read_cb, 0);
-				zigbee_configure_sleepy_behavior(false);
-				k_work_reschedule(&wake_timeout_work,
-						  K_SECONDS(BUTTON_WAKE_DURATION_S));
-			} else {
-				LOG_INF("Button released after %lld ms (no action)", hold_time);
-			}
-		}
-	}
-}
-
-static void button_callback(const struct device *dev, struct gpio_callback *cb,
-			    uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
-
-	/* On any edge, schedule debounce check - it will read settled state */
-	k_work_reschedule(&debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
-}
-
-static int button_init(void)
-{
-	int ret;
-
-	if (!gpio_is_ready_dt(&reset_button)) {
-		LOG_ERR("Reset button GPIO not ready");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure reset button: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_BOTH);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure button interrupt: %d", ret);
-		return ret;
-	}
-
-	gpio_init_callback(&button_cb_data, button_callback,
-			   BIT(reset_button.pin));
-	gpio_add_callback(reset_button.port, &button_cb_data);
-
-	k_work_init_delayable(&debounce_work, debounce_handler);
-	k_work_init_delayable(&factory_reset_work, factory_reset_handler);
-	k_work_init_delayable(&wake_timeout_work, wake_timeout_handler);
-
-	/* Initialize state from current pin level.
-	 * If button is pressed on boot (e.g., still held from factory reset),
-	 * wait for release before monitoring to avoid spurious actions.
-	 */
-	button_pressed_state = gpio_pin_get_dt(&reset_button);
-
-	LOG_INF("Reset button ready on P0.31 (initial state: %s)",
-		button_pressed_state ? "pressed" : "released");
-
-	if (button_pressed_state) {
-		LOG_INF("Button held on boot - waiting for release before monitoring");
-		/* Wait for button to be released before starting normal monitoring */
-		atomic_set(&long_press_handled, 1);  /* Suppress any actions until released */
-	}
-
-	return 0;
-}
-#endif /* DT_NODE_EXISTS(RESET_BUTTON_NODE) */
-
-/* ─── ZCL attribute lists ─── */
 
 ZB_ZCL_DECLARE_BASIC_ATTRIB_LIST_EXT(
 	basic_attr_list,
@@ -324,71 +133,29 @@ ZB_ZCL_DECLARE_BASIC_ATTRIB_LIST_EXT(
 	&dev_ctx.basic_attr.ph_env,
 	dev_ctx.basic_attr.sw_ver);
 
-ZB_ZCL_DECLARE_IDENTIFY_CLIENT_ATTRIB_LIST(
-	identify_client_attr_list);
+ZB_ZCL_DECLARE_IDENTIFY_CLIENT_ATTRIB_LIST(identify_client_attr_list);
+ZB_ZCL_DECLARE_IDENTIFY_SERVER_ATTRIB_LIST(identify_server_attr_list, &dev_ctx.identify_attr.identify_time);
 
-ZB_ZCL_DECLARE_IDENTIFY_SERVER_ATTRIB_LIST(
-	identify_server_attr_list,
-	&dev_ctx.identify_attr.identify_time);
-
-/* Custom power config attribute list with batteryPercentageRemaining
- * Using raw attribute descriptors since ZBOSS macros require bat_num suffix
- */
-zb_zcl_attr_t power_config_attr_list[] = {
+static zb_zcl_attr_t power_config_attr_list[] = {
 	{
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
 		ZB_ZCL_ATTR_TYPE_U8,
 		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
 		(void *)&dev_ctx.battery_voltage
 	},
 	{
 		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
 		ZB_ZCL_ATTR_TYPE_U8,
 		ZB_ZCL_ATTR_ACCESS_READ_ONLY | ZB_ZCL_ATTR_ACCESS_REPORTING,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
 		(void *)&dev_ctx.battery_percentage
-	},
-	{
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_SIZE_ID,
-		ZB_ZCL_ATTR_TYPE_8BIT_ENUM,
-		ZB_ZCL_ATTR_ACCESS_READ_ONLY,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
-		(void *)&dev_ctx.battery_size
-	},
-	{
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_QUANTITY_ID,
-		ZB_ZCL_ATTR_TYPE_U8,
-		ZB_ZCL_ATTR_ACCESS_READ_ONLY,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
-		(void *)&dev_ctx.battery_quantity
-	},
-	{
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_RATED_VOLTAGE_ID,
-		ZB_ZCL_ATTR_TYPE_U8,
-		ZB_ZCL_ATTR_ACCESS_READ_ONLY,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
-		(void *)&dev_ctx.battery_rated_voltage
-	},
-	{
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_ALARM_MASK_ID,
-		ZB_ZCL_ATTR_TYPE_8BITMAP,
-		ZB_ZCL_ATTR_ACCESS_READ_WRITE,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
-		(void *)&dev_ctx.battery_alarm_mask
-	},
-	{
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_MIN_THRESHOLD_ID,
-		ZB_ZCL_ATTR_TYPE_U8,
-		ZB_ZCL_ATTR_ACCESS_READ_WRITE,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
-		(void *)&dev_ctx.battery_voltage_min_threshold
 	},
 	{
 		ZB_ZCL_NULL_ID,
 		0,
 		0,
-		(ZB_ZCL_NON_MANUFACTURER_SPECIFIC),
+		ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
 		NULL
 	}
 };
@@ -406,8 +173,6 @@ ZB_ZCL_DECLARE_REL_HUMIDITY_MEASUREMENT_ATTRIB_LIST(
 	&dev_ctx.hum_min_value,
 	&dev_ctx.hum_max_value);
 
-/* ─── Cluster list, endpoint, device context ─── */
-
 ZB_DECLARE_FROSTBEE_CLUSTER_LIST(
 	frostbee_clusters,
 	basic_attr_list,
@@ -422,239 +187,189 @@ ZB_DECLARE_FROSTBEE_EP(
 	FROSTBEE_ENDPOINT,
 	frostbee_clusters);
 
-/* The zigbee_fota module registers its own OTA Upgrade endpoint (ep 10).
- * Declare a 2-endpoint device context: sensor endpoint + FOTA endpoint.
- */
-ZBOSS_DECLARE_DEVICE_CTX_2_EP(
-	frostbee_ctx,
-	frostbee_ep,
-	zigbee_fota_client_ep);
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+ZBOSS_DECLARE_DEVICE_CTX_2_EP(frostbee_ctx, frostbee_ep, zigbee_fota_client_ep);
+#else
+ZBOSS_DECLARE_DEVICE_CTX_1_EP(frostbee_ctx, frostbee_ep);
+#endif
 
-/* ─── Attribute initialization ─── */
-
-static void clusters_attr_init(void)
-{
-	/* Basic cluster */
-	dev_ctx.basic_attr.zcl_version = ZB_ZCL_VERSION;
-	dev_ctx.basic_attr.app_version = FROSTBEE_INIT_BASIC_APP_VERSION;
-	dev_ctx.basic_attr.stack_version = FROSTBEE_INIT_BASIC_STACK_VERSION;
-	dev_ctx.basic_attr.hw_version = FROSTBEE_INIT_BASIC_HW_VERSION;
-
-	ZB_ZCL_SET_STRING_VAL(
-		dev_ctx.basic_attr.mf_name,
-		FROSTBEE_INIT_BASIC_MANUF_NAME,
-		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_INIT_BASIC_MANUF_NAME));
-
-	ZB_ZCL_SET_STRING_VAL(
-		dev_ctx.basic_attr.model_id,
-		FROSTBEE_INIT_BASIC_MODEL_ID,
-		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_INIT_BASIC_MODEL_ID));
-
-	ZB_ZCL_SET_STRING_VAL(
-		dev_ctx.basic_attr.date_code,
-		FROSTBEE_INIT_BASIC_DATE_CODE,
-		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_INIT_BASIC_DATE_CODE));
-
-	dev_ctx.basic_attr.power_source = ZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
-
-	ZB_ZCL_SET_STRING_VAL(
-		dev_ctx.basic_attr.location_id,
-		FROSTBEE_INIT_BASIC_LOCATION_DESC,
-		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_INIT_BASIC_LOCATION_DESC));
-
-	dev_ctx.basic_attr.ph_env = FROSTBEE_INIT_BASIC_PH_ENV;
-
-	/* Software version (shows in Z2M as human-readable string) */
-	ZB_ZCL_SET_STRING_VAL(
-		dev_ctx.basic_attr.sw_ver,
-		FROSTBEE_SW_VERSION,
-		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
-
-	/* Identify cluster */
-	dev_ctx.identify_attr.identify_time =
-		ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
-
-	/* Power configuration — 3× AA batteries in series */
-	dev_ctx.battery_voltage = 45;  /* 4.5V in units of 100mV (fresh batteries) */
-	dev_ctx.battery_percentage = 200; /* 100% (ZCL uses 0.5% units, so 200 = 100%) */
-	dev_ctx.battery_size = ZB_ZCL_POWER_CONFIG_BATTERY_SIZE_AA;
-	dev_ctx.battery_quantity = 3;  /* 3× AA in series */
-	dev_ctx.battery_rated_voltage = 15; /* 1.5V per cell in units of 100mV */
-	dev_ctx.battery_alarm_mask = 0;
-	dev_ctx.battery_voltage_min_threshold = 30; /* 3.0V alarm threshold (1.0V per cell) */
-
-	/* Temperature measurement */
-	dev_ctx.temp_measure_value = ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN;
-	dev_ctx.temp_min_value = FROSTBEE_TEMP_MIN_VALUE;
-	dev_ctx.temp_max_value = FROSTBEE_TEMP_MAX_VALUE;
-	dev_ctx.temp_tolerance = 20; /* 0.2 C tolerance (SHT40 typical accuracy) */
-
-	/* Humidity measurement */
-	dev_ctx.hum_measure_value = ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_UNKNOWN;
-	dev_ctx.hum_min_value = FROSTBEE_HUM_MIN_VALUE;
-	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
-}
-
-/* ─── Battery voltage measurement ─── */
-
-/* Compare function for qsort - ascending order */
 static int compare_int16(const void *a, const void *b)
 {
 	return (*(int16_t *)a - *(int16_t *)b);
 }
 
-/* Read battery voltage via ADC with voltage divider enable/disable.
- *
- * Circuit: BAT+ → R1(10kΩ) → [P0.29/ADC] → R2(10kΩ) → [P0.02/GPIO] → GND
- *                                        └→ C(0.1µF) → GND
- *
- * Power saving: P0.02 configured as INPUT (high-Z) when not measuring.
- *               Only set to OUTPUT LOW when reading ADC (enables divider).
- *
- * Measurement strategy: Take 5 samples, remove min/max, average middle 3.
- * This eliminates ADC noise and transient spikes.
- *
- * Returns battery voltage in ZCL format (units of 100mV), or 0 on error.
- */
-static uint8_t read_battery_voltage(void)
+static void log_fixed2(const char *label, int32_t value)
+{
+	int32_t abs_value = value < 0 ? -value : value;
+	LOG_INF("%s: %s%d.%02d", label, value < 0 ? "-" : "", abs_value / 100, abs_value % 100);
+}
+
+static void clusters_attr_init(void)
+{
+	dev_ctx.basic_attr.zcl_version = ZB_ZCL_VERSION;
+	dev_ctx.basic_attr.app_version = 1;
+	dev_ctx.basic_attr.stack_version = 1;
+	dev_ctx.basic_attr.hw_version = 1;
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260308", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
+		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
+	dev_ctx.basic_attr.power_source = ZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
+	dev_ctx.basic_attr.ph_env = ZB_ZCL_BASIC_ENV_UNSPECIFIED;
+
+	dev_ctx.identify_attr.identify_time = ZB_ZCL_IDENTIFY_IDENTIFY_TIME_DEFAULT_VALUE;
+
+	dev_ctx.battery_voltage = 45;
+	dev_ctx.battery_percentage = 200;
+	dev_ctx.temp_measure_value = ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_UNKNOWN;
+	dev_ctx.temp_min_value = FROSTBEE_TEMP_MIN_VALUE;
+	dev_ctx.temp_max_value = FROSTBEE_TEMP_MAX_VALUE;
+	dev_ctx.temp_tolerance = 20;
+	dev_ctx.hum_measure_value = ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_UNKNOWN;
+	dev_ctx.hum_min_value = FROSTBEE_HUM_MIN_VALUE;
+	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
+}
+
+static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
+{
+	struct sensor_value temp;
+	struct sensor_value hum;
+	int ret;
+	int64_t temp_micro;
+	int64_t hum_micro;
+
+	if (!device_is_ready(sht)) {
+		return -ENODEV;
+	}
+
+	ret = sensor_sample_fetch(sht);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(sht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(sht, SENSOR_CHAN_HUMIDITY, &hum);
+	if (ret < 0) {
+		return ret;
+	}
+
+	temp_micro = (int64_t)temp.val1 * 1000000LL + temp.val2;
+	hum_micro = (int64_t)hum.val1 * 1000000LL + hum.val2;
+	*temp_centi = (zb_int16_t)(temp_micro / 10000);
+	*hum_centi = (zb_uint16_t)(hum_micro / 10000);
+
+	log_fixed2("Temperature [C]", *temp_centi);
+	log_fixed2("Humidity [%]", *hum_centi);
+	return 0;
+}
+
+static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zcl)
 {
 	int ret;
 	int16_t samples[5];
+	int32_t adc_mv;
+	int32_t battery_mv;
+	int32_t percentage_raw;
 
 	if (!device_is_ready(adc_dev)) {
-		LOG_ERR("ADC device not ready");
-		return 0;
+		return -ENODEV;
 	}
 
-	/* Enable voltage divider: set P0.02 as OUTPUT LOW (connects R2 to GND) */
 	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_OUTPUT_ACTIVE);
 	if (ret < 0) {
-		LOG_ERR("Failed to enable voltage divider: %d", ret);
-		return 0;
+		return ret;
 	}
 
-	/* Wait for capacitor to charge and voltage to stabilize
-	 * RC = 10kΩ × 0.1µF = 1ms, wait 2ms to be safe
-	 */
 	k_msleep(2);
 
-	/* Take 5 ADC samples */
 	for (int i = 0; i < 5; i++) {
 		ret = adc_read(adc_dev, &adc_seq);
 		if (ret < 0) {
-			LOG_ERR("ADC read %d failed: %d", i, ret);
 			gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
-			return 0;
+			return ret;
 		}
-		samples[i] = adc_sample_buffer;
 
-		/* Small delay between samples to allow ADC to settle */
+		samples[i] = adc_sample_buffer;
 		if (i < 4) {
-			k_usleep(500);  /* 500µs between samples */
+			k_usleep(500);
 		}
 	}
 
-	/* Disable voltage divider: set P0.02 as INPUT (high impedance, ~0µA) */
 	gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
 
-	/* Sort samples to find min/max */
 	qsort(samples, 5, sizeof(int16_t), compare_int16);
 
-	/* Average the middle 3 values (exclude min=samples[0] and max=samples[4]) */
-	int32_t sum = samples[1] + samples[2] + samples[3];
-	int16_t avg_sample = sum / 3;
+	adc_mv = ((int32_t)(samples[1] + samples[2] + samples[3]) / 3);
+	adc_mv = (adc_mv * ADC_VREF_MV * ADC_GAIN_FACTOR) / 4095;
+	battery_mv = adc_mv * VDIV_FACTOR;
+	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
-	LOG_DBG("ADC samples: [%d, %d, %d, %d, %d] → avg of middle 3: %d",
-		samples[0], samples[1], samples[2], samples[3], samples[4], avg_sample);
-
-	/* Convert ADC value to millivolts at ADC pin (P0.29)
-	 * Formula: mV = (sample × VREF_mV × GAIN_FACTOR) / (2^12 - 1)
-	 * Example: sample=2048 → (2048 × 600 × 6) / 4095 = 1800mV
-	 */
-	int32_t adc_mv = ((int32_t)avg_sample * ADC_VREF_MV * ADC_GAIN_FACTOR) / 4095;
-
-	/* Actual battery voltage (voltage divider is 1:2, so multiply by 2) */
-	int32_t battery_mv = adc_mv * VDIV_FACTOR;
-
-	/* Convert to ZCL format: units of 100mV (round to nearest, not truncate) */
-	uint8_t battery_zcl = (uint8_t)((battery_mv + 50) / 100);
-
-	/* Calculate battery percentage (linear approximation for 3× AA batteries):
-	 * 4.5V (fresh) = 100%, 3.0V (depleted) = 0%
-	 * ZCL uses 0.5% units, so 200 = 100%, 0 = 0%
-	 */
-	int32_t percentage_raw = ((battery_mv - 3000) * 200) / 1500;
+	percentage_raw = ((battery_mv - 3000) * 200) / 1500;
 	if (percentage_raw < 0) {
 		percentage_raw = 0;
 	}
 	if (percentage_raw > 200) {
 		percentage_raw = 200;
 	}
-	uint8_t battery_pct = (uint8_t)percentage_raw;
+	*battery_pct_zcl = (zb_uint8_t)percentage_raw;
 
 	LOG_INF("Battery: %d mV (ZCL=%u), %u%% (ZCL=%u)",
-		battery_mv, battery_zcl,
-		battery_pct / 2, battery_pct);
+		battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
 
-	/* Update device context */
-	dev_ctx.battery_voltage = battery_zcl;
-	dev_ctx.battery_percentage = battery_pct;
-
-	return battery_zcl;
+	return 0;
 }
 
-/* ─── Sensor reading & ZCL attribute update ─── */
-
-/* Read temperature/humidity sensor and update ZCL attributes.
- * Thread-safe via mutex - can be called from button or timer context.
- * force_report: ZB_TRUE = send report immediately, ZB_FALSE = let ZBOSS decide.
- */
-static void sensor_read(zb_bool_t force_report)
+static void measurement_update(zb_bool_t force_report)
 {
-	struct sensor_value temp, hum;
+	zb_int16_t temp_centi;
+	zb_uint16_t hum_centi;
+	zb_uint8_t battery_zcl;
+	zb_uint8_t battery_pct_zcl;
 	int ret;
+
+	if (force_report) {
+		forced_reports_attempted++;
+	}
 
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
-	if (!device_is_ready(sht)) {
-		LOG_ERR("SHT4X not ready, skipping read");
+	ret = read_sensor_once(&temp_centi, &hum_centi);
+	if (ret < 0) {
+		LOG_ERR("Sensor read failed: %d", ret);
+		if (force_report) {
+			forced_reports_failed++;
+		}
 		k_mutex_unlock(&sensor_mutex);
 		return;
 	}
 
-	ret = sensor_sample_fetch(sht);
-	if (ret) {
-		LOG_ERR("Sensor fetch failed: %d", ret);
+	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
+	if (ret < 0) {
+		LOG_ERR("Battery read failed: %d", ret);
+		if (force_report) {
+			forced_reports_failed++;
+		}
 		k_mutex_unlock(&sensor_mutex);
 		return;
 	}
 
-	sensor_channel_get(sht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
-	sensor_channel_get(sht, SENSOR_CHAN_HUMIDITY, &hum);
+	dev_ctx.temp_measure_value = temp_centi;
+	dev_ctx.hum_measure_value = hum_centi;
+	dev_ctx.battery_voltage = battery_zcl;
+	dev_ctx.battery_percentage = battery_pct_zcl;
 
-	/* Convert to ZCL format:
-	 * Temperature: signed int16 in units of 0.01 C
-	 * Humidity: unsigned int16 in units of 0.01 %RH
-	 */
-	zb_int16_t temp_zcl = (zb_int16_t)(temp.val1 * 100 +
-					    temp.val2 / 10000);
-	zb_uint16_t hum_zcl = (zb_uint16_t)(hum.val1 * 100 +
-					     hum.val2 / 10000);
-
-	LOG_INF("T: %d.%02d C (%d)  H: %d.%02d %%RH (%u)",
-		temp.val1, temp.val2 / 10000, temp_zcl,
-		hum.val1, hum.val2 / 10000, hum_zcl);
-
-	/* Update ZCL attributes.
-	 * ZB_FALSE = store value, let reporting engine decide when to send.
-	 * ZB_TRUE  = mark as changed, force report on next poll (button press).
-	 */
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
 		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-		(zb_uint8_t *)&temp_zcl,
+		(zb_uint8_t *)&dev_ctx.temp_measure_value,
 		force_report);
 
 	ZB_ZCL_SET_ATTRIBUTE(
@@ -662,26 +377,9 @@ static void sensor_read(zb_bool_t force_report)
 		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
 		ZB_ZCL_CLUSTER_SERVER_ROLE,
 		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-		(zb_uint8_t *)&hum_zcl,
+		(zb_uint8_t *)&dev_ctx.hum_measure_value,
 		force_report);
 
-	k_mutex_unlock(&sensor_mutex);
-}
-
-/* Read battery voltage and update ZCL attributes.
- * Thread-safe - can be called from button or timer context.
- */
-static void battery_read(zb_bool_t force_report)
-{
-	k_mutex_lock(&sensor_mutex, K_FOREVER);
-
-	if (read_battery_voltage() == 0) {
-		LOG_WRN("Battery read failed, skipping ZCL update");
-		k_mutex_unlock(&sensor_mutex);
-		return;
-	}
-
-	/* Update battery ZCL attributes */
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
 		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
@@ -698,71 +396,184 @@ static void battery_read(zb_bool_t force_report)
 		(zb_uint8_t *)&dev_ctx.battery_percentage,
 		force_report);
 
+	if (force_report) {
+		forced_reports_completed++;
+		LOG_INF("Forced report counters: requested=%u attempted=%u completed=%u failed=%u",
+			forced_reports_requested,
+			forced_reports_attempted,
+			forced_reports_completed,
+			forced_reports_failed);
+	}
+
 	k_mutex_unlock(&sensor_mutex);
 }
 
-/* Read both sensor and battery (used by button handler for on-demand reads).
- * Does not affect periodic timers.
- */
-static void sensor_and_battery_read(zb_bool_t force_report)
-{
-	sensor_read(force_report);
-	battery_read(force_report);
-}
-
-/* ZBOSS callback wrapper for on-demand button reads.
- * Forces immediate reports so data appears in HA right away.
- */
-static void sensor_and_battery_read_cb(zb_uint8_t param)
+static void measurement_now_cb(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
-	sensor_and_battery_read(ZB_TRUE);
+	measurement_update(ZB_TRUE);
 }
 
-/* Periodic sensor read callback (called by Zigbee alarm scheduler). */
-static void sensor_periodic(zb_bufid_t bufid)
+static void measurement_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
-
-	sensor_read(ZB_FALSE);
-
-	/* Schedule next periodic sensor read.
-	 * Use overflow-safe pattern (same as battery_periodic): multiply
-	 * seconds by beacons_per_second rather than passing ms directly to
-	 * ZB_MILLISECONDS_TO_BEACON_INTERVAL, which multiplies by 1000
-	 * internally. If SENSOR_READ_INTERVAL_S ever exceeds ~4295 s (71 min)
-	 * the direct form overflows uint32_t.
-	 */
-	ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
-			      (zb_time_t)SENSOR_READ_INTERVAL_S *
+	measurement_update(ZB_FALSE);
+	ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+			      (zb_time_t)REPORT_INTERVAL_S *
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
-/* Periodic battery read callback (called by Zigbee alarm scheduler). */
-static void battery_periodic(zb_bufid_t bufid)
+#if DT_NODE_EXISTS(RESET_BUTTON_NODE)
+static void long_press_handler(struct k_work *work)
 {
-	ARG_UNUSED(bufid);
+	ARG_UNUSED(work);
 
-	battery_read(ZB_FALSE);
-
-	/* Schedule next periodic battery read.
-	 * NOTE: Cannot pass BATTERY_READ_INTERVAL_S * 1000 directly to
-	 * ZB_MILLISECONDS_TO_BEACON_INTERVAL because the macro multiplies by
-	 * 1000 internally (ms→µs), causing 86400*1000*1000 = 86.4e9 to overflow
-	 * uint32_t (~4.29e9 max), which wraps to ~500 s instead of 24 h.
-	 * Fix: compute as seconds × beacons_per_second to stay in range.
-	 */
-	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
-			      (zb_time_t)BATTERY_READ_INTERVAL_S *
-			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+	if (gpio_pin_get_dt(&reset_button) == 1) {
+		atomic_set(&long_press_handled, 1);
+		LOG_WRN("Button held >= 5s. Factory reset/OTA path deferred in production app.");
+	}
 }
 
-/* ─── Zigbee FOTA ─── */
+static void debounce_handler(struct k_work *work)
+{
+	int pressed;
 
-/* ZCL device callback - forwards OTA upgrade events to the FOTA library.
- * Without this, the ZBOSS stack cannot invoke the application-level OTA
- * handler and Image Notify messages are silently ignored.
- */
+	ARG_UNUSED(work);
+	pressed = gpio_pin_get_dt(&reset_button);
+
+	if (pressed == button_pressed_state) {
+		return;
+	}
+	button_pressed_state = pressed;
+
+	if (pressed) {
+		button_press_time = k_uptime_get();
+		atomic_set(&long_press_handled, 0);
+		k_work_schedule(&long_press_work, K_MSEC(BUTTON_FACTORY_RESET_MS));
+		LOG_INF("Button pressed");
+		return;
+	}
+
+	k_work_cancel_delayable(&long_press_work);
+
+	if (atomic_get(&long_press_handled)) {
+		atomic_set(&long_press_handled, 0);
+		LOG_INF("Button released after long press");
+		return;
+	}
+
+	if ((k_uptime_get() - button_press_time) < BUTTON_SHORT_PRESS_MAX_MS) {
+		if (zigbee_network_ready) {
+			LOG_INF("Short press: forced report");
+			forced_reports_requested++;
+			ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
+		} else {
+			LOG_INF("Short press: ignored (not joined yet)");
+		}
+	} else {
+		LOG_INF("Button released (no action)");
+	}
+}
+
+static void button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+
+	k_work_reschedule(&debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
+}
+
+static int button_init(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&reset_button)) {
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_BOTH);
+	if (ret < 0) {
+		return ret;
+	}
+
+	gpio_init_callback(&button_cb_data, button_callback, BIT(reset_button.pin));
+	gpio_add_callback(reset_button.port, &button_cb_data);
+
+	k_work_init_delayable(&debounce_work, debounce_handler);
+	k_work_init_delayable(&long_press_work, long_press_handler);
+
+	button_pressed_state = gpio_pin_get_dt(&reset_button);
+	return 0;
+}
+#endif
+
+static void try_enable_usb_logs(void)
+{
+	int ret;
+	const struct device *cdc_dev;
+	uint32_t dtr = 0U;
+	int tries = 0;
+
+	ret = usb_enable(NULL);
+	if (ret < 0 && ret != -EALREADY) {
+		LOG_WRN("usb_enable failed: %d", ret);
+		return;
+	}
+
+	cdc_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+	if (!device_is_ready(cdc_dev)) {
+		return;
+	}
+
+	while (tries < 50 && dtr == 0U) {
+		uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr);
+		k_msleep(100);
+		tries++;
+	}
+
+	if (dtr) {
+		LOG_INF("USB terminal connected (DTR set)");
+	}
+}
+
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+static void ota_evt_handler(const struct zigbee_fota_evt *evt)
+{
+	switch (evt->id) {
+	case ZIGBEE_FOTA_EVT_PROGRESS:
+		if (!ota_in_progress) {
+			ota_in_progress = true;
+			zigbee_configure_sleepy_behavior(false);
+			LOG_INF("OTA transfer started, sleepy behavior disabled");
+		}
+		LOG_INF("OTA progress: %d%%", evt->dl.progress);
+		break;
+
+	case ZIGBEE_FOTA_EVT_FINISHED:
+		LOG_INF("OTA image ready, rebooting into MCUboot");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+
+	case ZIGBEE_FOTA_EVT_ERROR:
+		LOG_ERR("OTA transfer failed");
+		if (ota_in_progress) {
+			ota_in_progress = false;
+			zigbee_configure_sleepy_behavior(true);
+			LOG_INF("Sleepy behavior restored after OTA failure");
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
 static void zcl_device_cb(zb_bufid_t bufid)
 {
 	zb_zcl_device_callback_param_t *device_cb_param =
@@ -774,43 +585,7 @@ static void zcl_device_cb(zb_bufid_t bufid)
 		device_cb_param->status = RET_NOT_IMPLEMENTED;
 	}
 }
-
-static void fota_evt_handler(const struct zigbee_fota_evt *evt)
-{
-	switch (evt->id) {
-	case ZIGBEE_FOTA_EVT_PROGRESS:
-		if (!ota_in_progress) {
-			ota_in_progress = true;
-			/* Keep device awake during OTA transfer.
-			 * Without this, the sleepy end device goes back to sleep
-			 * between block requests and the transfer stalls.
-			 */
-			zigbee_configure_sleepy_behavior(false);
-			LOG_INF("OTA transfer started - sleep disabled");
-		}
-		LOG_INF("OTA progress: %d%%", evt->dl.progress);
-		break;
-
-	case ZIGBEE_FOTA_EVT_FINISHED:
-		LOG_INF("OTA download complete - rebooting into new firmware");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-
-	case ZIGBEE_FOTA_EVT_ERROR:
-		LOG_ERR("OTA update failed");
-		if (ota_in_progress) {
-			ota_in_progress = false;
-			zigbee_configure_sleepy_behavior(true);
-			LOG_INF("OTA failed - sleep re-enabled");
-		}
-		break;
-
-	default:
-		break;
-	}
-}
-
-/* ─── Zigbee signal handler ─── */
+#endif
 
 void zboss_signal_handler(zb_bufid_t bufid)
 {
@@ -818,60 +593,32 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
 	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
 
-	/* Verbose signal tracing - only visible at LOG_LEVEL_DBG */
-	LOG_DBG("Zigbee signal: %d, status: %d", sig, status);
-
-	/* Let FOTA module handle OTA-related signals (it starts server
-	 * discovery on DEVICE_REBOOT / STEERING and ignores the rest).
-	 */
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
 	zigbee_fota_signal_handler(bufid);
+#endif
 
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
-		/* fall-through */
 	case ZB_BDB_SIGNAL_STEERING:
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
-			LOG_INF("Joined network, starting periodic reads");
-			/* Cancel any existing alarms before rescheduling.
-			 * On STEERING (rejoin after coordinator restart) these may
-			 * already be running from the initial DEVICE_REBOOT signal.
-			 * Without cancelling first, ZBOSS may queue a duplicate.
-			 */
-			ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
-			ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
-			/* Start periodic sensor reading (temp/humidity every 10 min) */
-			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
+			zigbee_network_ready = true;
+			LOG_INF("Zigbee joined/rejoined (signal=%d), reporting each %ds",
+				sig, REPORT_INTERVAL_S);
+			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
+			measurement_update(ZB_FALSE);
+			ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+					      (zb_time_t)REPORT_INTERVAL_S *
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
-			LOG_INF("Scheduled sensor_periodic in 1s");
-			/* Start periodic battery reading (voltage every 18h) */
-			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
-					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
-			LOG_INF("Scheduled battery_periodic in 1s");
 		} else {
-			LOG_WRN("Join signal received but status=%d (not RET_OK)", status);
+			LOG_WRN("Zigbee signal %d status=%d", sig, status);
 		}
 		break;
 
 	case ZB_ZDO_SIGNAL_LEAVE:
-		/* Factory reset triggered - reboot after leaving network */
-#if DT_NODE_EXISTS(RESET_BUTTON_NODE)
-		if (atomic_get(&long_press_handled)) {
-			LOG_WRN("Left network after factory reset, rebooting...");
-			k_msleep(100);
-			sys_reboot(SYS_REBOOT_COLD);
-		}
-#endif
+		zigbee_network_ready = false;
+		LOG_WRN("Zigbee leave signal");
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
-		break;
-
-	case ZB_ZDO_SIGNAL_PRODUCTION_CONFIG_READY:
-		/* Production config partition is empty - this is normal,
-		 * we don't use install codes or pre-shared keys. */
-		break;
-
-	case ZB_SIGNAL_JOIN_DONE:
-		/* Certification testing signal - ignore. */
 		break;
 
 	default:
@@ -884,101 +631,79 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	}
 }
 
-/* ─── Main ─── */
-
 int main(void)
 {
+	int ret;
 
-	/* Get sensor device handle */
-	sht = DEVICE_DT_GET_ANY(sensirion_sht4x);
-	if (sht == NULL) {
-		LOG_ERR("SHT4X device not found in devicetree");
-		return -ENODEV;
-	}
-	if (!device_is_ready(sht)) {
-		LOG_ERR("SHT4X device not ready");
-		return -ENODEV;
-	}
-	LOG_INF("SHT40 sensor ready");
+	LOG_INF("Frostbee production app boot (ported from validated UF2 baseline)");
 
-	/* Initialize ADC for battery voltage measurement */
-	adc_dev = DEVICE_DT_GET(ADC_NODE);
+	try_enable_usb_logs();
+
 	if (!device_is_ready(adc_dev)) {
-		LOG_ERR("ADC device not ready");
+		LOG_ERR("ADC not ready");
 		return -ENODEV;
 	}
 
-	if (adc_channel_setup(adc_dev, &adc_cfg) < 0) {
-		LOG_ERR("ADC channel setup failed");
-		return -EIO;
-	}
-	LOG_INF("ADC ready on P0.29 (AIN5) for battery voltage");
-
-	/* Initialize GPIO for voltage divider control (P0.02)
-	 * Start as INPUT (high-Z) to save power - divider is OFF by default
-	 */
 	if (!gpio_is_ready_dt(&vbat_enable)) {
-		LOG_ERR("Battery enable GPIO not ready");
+		LOG_ERR("VBAT enable GPIO not ready");
 		return -ENODEV;
 	}
 
-	if (gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT) < 0) {
-		LOG_ERR("Failed to configure battery enable GPIO");
-		return -EIO;
+	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
+	if (ret < 0) {
+		LOG_ERR("Failed to set VBAT enable pin idle: %d", ret);
+		return ret;
 	}
-	LOG_INF("Battery voltage divider control ready on P0.02 (default: OFF)");
+
+	ret = adc_channel_setup(adc_dev, &adc_cfg);
+	if (ret < 0) {
+		LOG_ERR("ADC channel setup failed: %d", ret);
+		return ret;
+	}
+
+	if (!device_is_ready(sht)) {
+		LOG_ERR("SHT4X not ready");
+		return -ENODEV;
+	}
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
-	if (button_init() < 0) {
-		LOG_WRN("Reset button init failed - continuing without it");
+	ret = button_init();
+	if (ret < 0) {
+		LOG_ERR("Button init failed: %d", ret);
 	}
 #endif
 
-	/* Configure as sleepy end device */
-	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
-	/* Match ed_timeout so the coordinator buffers messages for the full
-	 * 64-minute window — prevents queued messages (e.g. Configure Reporting
-	 * from Z2M after coordinator restart) being dropped before the sleeping
-	 * device wakes up to collect them.
-	 * Use the overflow-safe pattern: seconds × beacons_per_second.
-	 */
-	zb_set_keepalive_timeout((zb_time_t)64 * 60 * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
-	zigbee_configure_sleepy_behavior(true);
-
-	/* Power down unused RAM */
-	if (IS_ENABLED(CONFIG_RAM_POWER_DOWN_LIBRARY)) {
-		power_down_unused_ram();
-	}
-
-	/* Register ZCL device callback (must be before ZB_AF_REGISTER_DEVICE_CTX).
-	 * This enables the FOTA library to handle OTA Image Notify messages.
-	 */
-	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
-
-	/* Register device context and initialize attributes */
-	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
 	clusters_attr_init();
 
-	/* Initialize Zigbee FOTA module.
-	 * Registers the OTA Upgrade endpoint (ep 33) and sets up MCUboot image
-	 * management. The callback handles progress logging and reboot on finish.
-	 */
-	zigbee_fota_init(fota_evt_handler);
-	LOG_INF("Zigbee FOTA (OTA updates) ready");
+	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
+	zb_set_keepalive_timeout(ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
+	zigbee_configure_sleepy_behavior(true);
 
-	/* Confirm the running image so MCUboot does not revert it on next boot.
-	 * Must be called after successful hardware init and before the main loop.
-	 */
-	boot_write_img_confirmed();
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+	ret = zigbee_fota_init(ota_evt_handler);
+	if (ret < 0) {
+		LOG_ERR("zigbee_fota_init failed: %d", ret);
+		return ret;
+	}
+	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
+#endif
 
-	/* Start Zigbee stack */
+	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
+
+	if (!boot_is_img_confirmed()) {
+		ret = boot_write_img_confirmed();
+		if (ret < 0) {
+			LOG_ERR("boot_write_img_confirmed failed: %d", ret);
+			return ret;
+		}
+		LOG_INF("Confirmed running MCUboot image");
+	}
+
 	zigbee_enable();
 
-	LOG_INF("Frostbee %s - Zigbee stack started", FROSTBEE_SW_VERSION);
+	LOG_INF("Zigbee enabled (%s, %ds reporting)", FROSTBEE_SW_VERSION, REPORT_INTERVAL_S);
 
 	while (1) {
 		k_sleep(K_FOREVER);
 	}
-
-	return 0;
 }
