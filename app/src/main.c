@@ -573,18 +573,6 @@ static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 		break;
 	}
 }
-
-static void zcl_device_cb(zb_bufid_t bufid)
-{
-	zb_zcl_device_callback_param_t *device_cb_param =
-		ZB_BUF_GET_PARAM(bufid, zb_zcl_device_callback_param_t);
-
-	if (device_cb_param->device_cb_id == ZB_ZCL_OTA_UPGRADE_VALUE_CB_ID) {
-		zigbee_fota_zcl_cb(bufid);
-	} else {
-		device_cb_param->status = RET_NOT_IMPLEMENTED;
-	}
-}
 #endif
 
 void zboss_signal_handler(zb_bufid_t bufid)
@@ -685,7 +673,7 @@ int main(void)
 		LOG_ERR("zigbee_fota_init failed: %d", ret);
 		return ret;
 	}
-	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
+	ZB_ZCL_REGISTER_DEVICE_CB(zigbee_fota_zcl_cb);
 #endif
 
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
