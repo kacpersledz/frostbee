@@ -16,6 +16,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/dfu/mcuboot.h>
 
@@ -30,7 +31,13 @@
 #include <zboss_api_addons.h>
 #include <zigbee/zigbee_app_utils.h>
 #include <zigbee/zigbee_error_handler.h>
+#include <zigbee/zigbee_fota.h>
 #include <zb_nrf_platform.h>
+
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+/* The zigbee_fota library exposes its endpoint from the implementation. */
+extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
+#endif
 
 #include "zb_mem_config_custom.h"
 #include "zb_frostbee.h"
@@ -90,6 +97,7 @@ static atomic_t long_press_handled;
 
 static K_MUTEX_DEFINE(sensor_mutex);
 static bool zigbee_network_ready;
+static bool ota_in_progress;
 static uint32_t forced_reports_requested;
 static uint32_t forced_reports_attempted;
 static uint32_t forced_reports_completed;
@@ -179,7 +187,11 @@ ZB_DECLARE_FROSTBEE_EP(
 	FROSTBEE_ENDPOINT,
 	frostbee_clusters);
 
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+ZBOSS_DECLARE_DEVICE_CTX_2_EP(frostbee_ctx, frostbee_ep, zigbee_fota_client_ep);
+#else
 ZBOSS_DECLARE_DEVICE_CTX_1_EP(frostbee_ctx, frostbee_ep);
+#endif
 
 static int compare_int16(const void *a, const void *b)
 {
@@ -530,11 +542,60 @@ static void try_enable_usb_logs(void)
 	}
 }
 
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+static void ota_evt_handler(const struct zigbee_fota_evt *evt)
+{
+	switch (evt->id) {
+	case ZIGBEE_FOTA_EVT_PROGRESS:
+		if (!ota_in_progress) {
+			ota_in_progress = true;
+			zigbee_configure_sleepy_behavior(false);
+			LOG_INF("OTA transfer started, sleepy behavior disabled");
+		}
+		LOG_INF("OTA progress: %d%%", evt->dl.progress);
+		break;
+
+	case ZIGBEE_FOTA_EVT_FINISHED:
+		LOG_INF("OTA image ready, rebooting into MCUboot");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+
+	case ZIGBEE_FOTA_EVT_ERROR:
+		LOG_ERR("OTA transfer failed");
+		if (ota_in_progress) {
+			ota_in_progress = false;
+			zigbee_configure_sleepy_behavior(true);
+			LOG_INF("Sleepy behavior restored after OTA failure");
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
+static void zcl_device_cb(zb_bufid_t bufid)
+{
+	zb_zcl_device_callback_param_t *device_cb_param =
+		ZB_BUF_GET_PARAM(bufid, zb_zcl_device_callback_param_t);
+
+	if (device_cb_param->device_cb_id == ZB_ZCL_OTA_UPGRADE_VALUE_CB_ID) {
+		zigbee_fota_zcl_cb(bufid);
+	} else {
+		device_cb_param->status = RET_NOT_IMPLEMENTED;
+	}
+}
+#endif
+
 void zboss_signal_handler(zb_bufid_t bufid)
 {
 	zb_zdo_app_signal_hdr_t *sig_hndler = NULL;
 	zb_zdo_app_signal_type_t sig = zb_get_app_signal(bufid, &sig_hndler);
 	zb_ret_t status = ZB_GET_APP_SIGNAL_STATUS(bufid);
+
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+	zigbee_fota_signal_handler(bufid);
+#endif
 
 	switch (sig) {
 	case ZB_BDB_SIGNAL_DEVICE_REBOOT:
@@ -618,13 +679,31 @@ int main(void)
 	zb_set_keepalive_timeout(ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
 	zigbee_configure_sleepy_behavior(true);
 
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+	ret = zigbee_fota_init(ota_evt_handler);
+	if (ret < 0) {
+		LOG_ERR("zigbee_fota_init failed: %d", ret);
+		return ret;
+	}
+	ZB_ZCL_REGISTER_DEVICE_CB(zcl_device_cb);
+#endif
+
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
-	boot_write_img_confirmed();
+
+	if (!boot_is_img_confirmed()) {
+		ret = boot_write_img_confirmed();
+		if (ret < 0) {
+			LOG_ERR("boot_write_img_confirmed failed: %d", ret);
+			return ret;
+		}
+		LOG_INF("Confirmed running MCUboot image");
+	}
+
 	zigbee_enable();
 
 	LOG_INF("Zigbee enabled (%s, %ds reporting)", FROSTBEE_SW_VERSION, REPORT_INTERVAL_S);
 
 	while (1) {
-		k_sleep(K_SECONDS(60));
+		k_sleep(K_FOREVER);
 	}
 }
