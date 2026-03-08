@@ -37,6 +37,10 @@
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
 /* The zigbee_fota library exposes its endpoint from the implementation. */
 extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
+
+#if FROSTBEE_ENDPOINT == CONFIG_ZIGBEE_FOTA_ENDPOINT
+#error "Frostbee endpoint and Zigbee OTA endpoint must be different."
+#endif
 #endif
 
 #include "zb_mem_config_custom.h"
@@ -98,6 +102,7 @@ static atomic_t long_press_handled;
 static K_MUTEX_DEFINE(sensor_mutex);
 static bool zigbee_network_ready;
 static bool ota_in_progress;
+static bool running_image_confirmed;
 static uint32_t forced_reports_requested;
 static uint32_t forced_reports_attempted;
 static uint32_t forced_reports_completed;
@@ -188,7 +193,7 @@ ZB_DECLARE_FROSTBEE_EP(
 	frostbee_clusters);
 
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
-ZBOSS_DECLARE_DEVICE_CTX_2_EP(frostbee_ctx, frostbee_ep, zigbee_fota_client_ep);
+ZBOSS_DECLARE_DEVICE_CTX_2_EP(frostbee_ctx, zigbee_fota_client_ep, frostbee_ep);
 #else
 ZBOSS_DECLARE_DEVICE_CTX_1_EP(frostbee_ctx, frostbee_ep);
 #endif
@@ -542,6 +547,24 @@ static void try_enable_usb_logs(void)
 	}
 }
 
+static void confirm_running_image(void)
+{
+	int ret;
+
+	if (running_image_confirmed) {
+		return;
+	}
+
+	ret = boot_write_img_confirmed();
+	if (ret < 0) {
+		LOG_ERR("boot_write_img_confirmed failed: %d", ret);
+		return;
+	}
+
+	running_image_confirmed = true;
+	LOG_INF("Confirmed running MCUboot image after Zigbee join");
+}
+
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
 static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 {
@@ -591,6 +614,7 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		ZB_ERROR_CHECK(zigbee_default_signal_handler(bufid));
 		if (status == RET_OK) {
 			zigbee_network_ready = true;
+			confirm_running_image();
 			LOG_INF("Zigbee joined/rejoined (signal=%d), reporting each %ds",
 				sig, REPORT_INTERVAL_S);
 			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
@@ -677,15 +701,7 @@ int main(void)
 #endif
 
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
-
-	if (!boot_is_img_confirmed()) {
-		ret = boot_write_img_confirmed();
-		if (ret < 0) {
-			LOG_ERR("boot_write_img_confirmed failed: %d", ret);
-			return ret;
-		}
-		LOG_INF("Confirmed running MCUboot image");
-	}
+	running_image_confirmed = boot_is_img_confirmed();
 
 	zigbee_enable();
 
