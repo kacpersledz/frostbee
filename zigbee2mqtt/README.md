@@ -1,6 +1,7 @@
 # Zigbee2MQTT Integration
 
 External converter for Frostbee sensor to make it a "supported" device in Zigbee2MQTT.
+Use `frostbee.js` as the primary converter file.
 
 ## Installation (Zigbee2MQTT v2.0+)
 
@@ -103,9 +104,8 @@ This means the external converter is not being loaded. Check:
    ```
 
 3. **Ensure correct file format:**
-   - Z2M v2.x supports both CommonJS (`module.exports`) and ES6 modules (`export default`)
-   - The provided `frostbee.js` uses ES6 format
-   - If you have issues, try the CommonJS version (see below)
+   - Z2M v2.x supports CommonJS (`module.exports`)
+   - Use the provided `frostbee.js`
 
 4. **Remove old configuration:**
    - If upgrading from Z2M v1.x, remove the `external_converters:` section from `configuration.yaml`
@@ -114,33 +114,6 @@ This means the external converter is not being loaded. Check:
 5. **Restart after adding the file:**
    - External converters are loaded at startup
    - After copying the file, always restart Z2M
-
-### CommonJS Format (Alternative)
-
-If the ES6 format doesn't work, try this CommonJS version:
-
-```javascript
-const {temperature, humidity, battery} = require('zigbee-herdsman-converters/lib/modernExtend');
-
-const definition = {
-    zigbeeModel: ['FBE_TH_1'],
-    model: 'FBE_TH_1',
-    vendor: 'Frostbee',
-    description: 'Temperature & humidity sensor (SHT40)',
-    extend: [
-        battery({
-            voltage: true,
-            voltageReporting: true,
-            percentageReportingConfig: {min: 3600, max: 65000, change: 2},
-            voltageReportingConfig: {min: 3600, max: 65000, change: 2},
-        }),
-        temperature({reporting: {min: 600, max: 3600, change: 10}}),
-        humidity({reporting: {min: 600, max: 3600, change: 50}}),
-    ],
-};
-
-module.exports = definition;
-```
 
 ### Device model doesn't match
 
