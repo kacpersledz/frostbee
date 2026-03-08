@@ -660,7 +660,7 @@ int main(void)
 {
 	int ret;
 
-	LOG_INF("Frostbee production app boot (ported from validated UF2 baseline)");
+	LOG_INF("Frostbee production app boot (OTA package test)");
 
 	try_enable_usb_logs();
 
