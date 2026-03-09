@@ -50,6 +50,7 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_DBG);
 
 #define REPORT_INTERVAL_S      15
 #define SED_KEEPALIVE_MS       3000
+#define OTA_KEEPALIVE_MS       250
 
 #define BUTTON_DEBOUNCE_MS         100
 #define BUTTON_SHORT_PRESS_MAX_MS  1000
@@ -578,6 +579,27 @@ static void confirm_running_image(void)
 	LOG_INF("Confirmed running MCUboot image after Zigbee join");
 }
 
+static void set_ota_transfer_mode(bool enabled)
+{
+	if (enabled) {
+		/* Keep poll traffic dense during OTA chunk transfer. On a sleepy end
+		 * device, disabling sleepy behavior alone may still leave parent polling
+		 * too sparse until the stack fully transitions, which hurts throughput.
+		 */
+		zb_set_keepalive_timeout(
+			ZB_MILLISECONDS_TO_BEACON_INTERVAL(OTA_KEEPALIVE_MS));
+		zigbee_configure_sleepy_behavior(false);
+		LOG_INF("OTA transfer mode enabled (sleep off, keepalive %d ms)",
+			OTA_KEEPALIVE_MS);
+	} else {
+		zb_set_keepalive_timeout(
+			ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
+		zigbee_configure_sleepy_behavior(true);
+		LOG_INF("OTA transfer mode disabled (sleep on, keepalive %d ms)",
+			SED_KEEPALIVE_MS);
+	}
+}
+
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
 static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 {
@@ -585,8 +607,7 @@ static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 	case ZIGBEE_FOTA_EVT_PROGRESS:
 		if (!ota_in_progress) {
 			ota_in_progress = true;
-			zigbee_configure_sleepy_behavior(false);
-			LOG_INF("OTA transfer started, sleepy behavior disabled");
+			set_ota_transfer_mode(true);
 		}
 		LOG_INF("OTA progress: %d%%", evt->dl.progress);
 		break;
@@ -600,8 +621,7 @@ static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 		LOG_ERR("OTA transfer failed");
 		if (ota_in_progress) {
 			ota_in_progress = false;
-			zigbee_configure_sleepy_behavior(true);
-			LOG_INF("Sleepy behavior restored after OTA failure");
+			set_ota_transfer_mode(false);
 		}
 		break;
 
@@ -701,8 +721,7 @@ int main(void)
 	clusters_attr_init();
 
 	zb_set_ed_timeout(ED_AGING_TIMEOUT_64MIN);
-	zb_set_keepalive_timeout(ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
-	zigbee_configure_sleepy_behavior(true);
+	set_ota_transfer_mode(false);
 
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
 	ret = zigbee_fota_init(ota_evt_handler);

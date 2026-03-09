@@ -141,6 +141,28 @@ ota:
   update_check_interval: 1440
 ```
 
+### OTA throughput notes for sleepy end devices
+
+Frostbee is a **Sleepy End Device (SED)** in normal runtime, so parent polling is intentionally sparse to save battery.
+During OTA this can make transfer look stalled (very small progress and huge ETA), even when packaging and headers are correct.
+
+Current app runtime switches to a temporary OTA transfer mode when download progress starts:
+
+- disable sleepy behavior (`zigbee_configure_sleepy_behavior(false)`)
+- reduce keepalive/poll interval from 3000 ms to 250 ms (`zb_set_keepalive_timeout(...)`)
+
+This is a normal pattern for battery devices: stay low power most of the time, then temporarily poll aggressively during large transfers.
+After an OTA error (or after reboot on success), the device returns to standard sleepy settings.
+
+If OTA is still too slow in your network, the next things to check are usually coordinator/router side limits instead of image format:
+
+- Zigbee2MQTT OTA block request pacing / in-flight block settings
+- parent router quality (LQI/RSSI, retries, route changes during transfer)
+- 2.4 GHz interference and channel overlap (Wi-Fi vs Zigbee channel)
+- OTA file size and logging overhead on both ends
+
+In short: this change is expected to be enough for many SED deployments, but practical speed is still bounded by network quality and coordinator policy.
+
 ## Home Assistant Integration
 
 | Integration | Setup |
