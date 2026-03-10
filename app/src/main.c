@@ -63,6 +63,9 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_DBG);
 #define ADC_GAIN_FACTOR 6
 #define VDIV_FACTOR     2
 
+/* OTA smoke-test override: force reported battery to 3.6V. Revert after test. */
+#define FROSTBEE_FORCE_BATTERY_MV 3600
+
 #define FROSTBEE_TEMP_MIN_VALUE  (-4000)
 #define FROSTBEE_TEMP_MAX_VALUE  12500
 #define FROSTBEE_HUM_MIN_VALUE   0
@@ -282,6 +285,24 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	int32_t adc_mv;
 	int32_t battery_mv;
 	int32_t percentage_raw;
+
+	if (FROSTBEE_FORCE_BATTERY_MV > 0) {
+		battery_mv = FROSTBEE_FORCE_BATTERY_MV;
+		*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
+
+		percentage_raw = ((battery_mv - 3000) * 200) / 1500;
+		if (percentage_raw < 0) {
+			percentage_raw = 0;
+		}
+		if (percentage_raw > 200) {
+			percentage_raw = 200;
+		}
+		*battery_pct_zcl = (zb_uint8_t)percentage_raw;
+
+		LOG_INF("Battery override: %d mV (ZCL=%u), %u%% (ZCL=%u)",
+			battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
+		return 0;
+	}
 
 	if (!device_is_ready(adc_dev)) {
 		return -ENODEV;
