@@ -46,11 +46,11 @@ extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
 #include "zb_mem_config_custom.h"
 #include "zb_frostbee.h"
 
-LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
 #define REPORT_INTERVAL_S      15
 #define SED_KEEPALIVE_MS       3000
-#define OTA_KEEPALIVE_MS       250
+#define OTA_KEEPALIVE_MS       100
 
 #define BUTTON_DEBOUNCE_MS         100
 #define BUTTON_SHORT_PRESS_MAX_MS  1000
@@ -444,7 +444,9 @@ static void measurement_now_cb(zb_uint8_t param)
 static void measurement_periodic(zb_bufid_t bufid)
 {
 	ARG_UNUSED(bufid);
-	measurement_update(ZB_FALSE);
+	if (!ota_in_progress) {
+		measurement_update(ZB_FALSE);
+	}
 	ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
 			      (zb_time_t)REPORT_INTERVAL_S *
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
@@ -500,9 +502,13 @@ static void debounce_handler(struct k_work *work)
 
 	if ((k_uptime_get() - button_press_time) < BUTTON_SHORT_PRESS_MAX_MS) {
 		if (zigbee_network_ready) {
-			LOG_INF("Short press: forced report");
-			forced_reports_requested++;
-			ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
+			if (ota_in_progress) {
+				LOG_INF("Short press: ignored during OTA transfer");
+			} else {
+				LOG_INF("Short press: forced report");
+				forced_reports_requested++;
+				ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
+			}
 		} else {
 			LOG_INF("Short press: ignored (not joined yet)");
 		}
