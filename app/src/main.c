@@ -608,15 +608,17 @@ static void confirm_running_image(void)
 
 static void set_ota_transfer_mode(bool enabled)
 {
-    if (enabled) {
-        zigbee_configure_sleepy_behavior(false);
-        zb_zdo_pim_set_long_poll_interval(OTA_KEEPALIVE_MS);
-        LOG_INF("OTA mode: FAST");
-    } else {
-        zigbee_configure_sleepy_behavior(true);
-        zb_zdo_pim_set_long_poll_interval(SED_KEEPALIVE_MS);
-        LOG_INF("OTA mode: SLEEPY");
-    }
+	if (enabled) {
+		zigbee_configure_sleepy_behavior(false);
+		zb_zdo_pim_set_long_poll_interval(
+			ZB_MILLISECONDS_TO_BEACON_INTERVAL(OTA_KEEPALIVE_MS));
+		LOG_INF("OTA mode: FAST");
+	} else {
+		zigbee_configure_sleepy_behavior(true);
+		zb_zdo_pim_set_long_poll_interval(
+			ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
+		LOG_INF("OTA mode: SLEEPY");
+	}
 }
 
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
