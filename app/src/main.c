@@ -49,9 +49,8 @@ extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
 LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
 #define REPORT_INTERVAL_S      15
-#define SED_KEEPALIVE_MS       3000
-#define OTA_KEEPALIVE_MS       100
-#define OTA_TURBO_POLL_MS      60000
+#define SED_LONG_POLL_MS       3000
+#define OTA_LONG_POLL_MS       500
 
 #define BUTTON_DEBOUNCE_MS         100
 #define BUTTON_SHORT_PRESS_MAX_MS  1000
@@ -609,22 +608,17 @@ static void confirm_running_image(void)
 
 static void set_ota_transfer_mode(bool enabled)
 {
-	if (enabled) {
-		zigbee_configure_sleepy_behavior(false);
-		zb_zdo_pim_set_long_poll_interval(OTA_KEEPALIVE_MS);
-		zb_zdo_pim_permit_turbo_poll(ZB_TRUE);
-		zb_zdo_pim_toggle_turbo_poll_retry_feature(ZB_TRUE);
-		zb_zdo_pim_start_turbo_poll_continuous(OTA_TURBO_POLL_MS);
-		LOG_INF("OTA mode: FAST (long poll %d ms, turbo poll on)",
-			OTA_KEEPALIVE_MS);
-	} else {
-		zb_zdo_pim_turbo_poll_continuous_leave(0);
-		zb_zdo_pim_toggle_turbo_poll_retry_feature(ZB_FALSE);
-		zb_zdo_pim_permit_turbo_poll(ZB_FALSE);
-		zigbee_configure_sleepy_behavior(true);
-		zb_zdo_pim_set_long_poll_interval(SED_KEEPALIVE_MS);
-		LOG_INF("OTA mode: SLEEPY (long poll %d ms)", SED_KEEPALIVE_MS);
-	}
+    if (enabled) {
+    		zigbee_configure_sleepy_behavior(false);
+    		zb_zdo_pim_set_long_poll_interval(
+    			ZB_MILLISECONDS_TO_BEACON_INTERVAL(OTA_LONG_POLL_MS));
+    		LOG_INF("OTA mode: FAST");
+    	} else {
+    		zigbee_configure_sleepy_behavior(true);
+    		zb_zdo_pim_set_long_poll_interval(
+    			ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_LONG_POLL_MS));
+    		LOG_INF("OTA mode: SLEEPY");
+    	}
 }
 
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
@@ -635,17 +629,11 @@ static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 		if (!ota_in_progress) {
 			ota_in_progress = true;
 			set_ota_transfer_mode(true);
-		} else {
-			zb_zdo_pim_start_turbo_poll_continuous(OTA_TURBO_POLL_MS);
 		}
 		LOG_INF("OTA progress: %d%%", evt->dl.progress);
 		break;
 
 	case ZIGBEE_FOTA_EVT_FINISHED:
-		if (ota_in_progress) {
-			ota_in_progress = false;
-			set_ota_transfer_mode(false);
-		}
 		LOG_INF("OTA image ready, rebooting into MCUboot");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
