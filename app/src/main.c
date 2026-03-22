@@ -221,7 +221,7 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260308", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260322", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
@@ -610,13 +610,11 @@ static void set_ota_transfer_mode(bool enabled)
 {
     if (enabled) {
     		zigbee_configure_sleepy_behavior(false);
-    		zb_zdo_pim_set_long_poll_interval(
-    			ZB_MILLISECONDS_TO_BEACON_INTERVAL(OTA_LONG_POLL_MS));
+    		zb_zdo_pim_set_long_poll_interval(OTA_LONG_POLL_MS);
     		LOG_INF("OTA mode: FAST");
     	} else {
     		zigbee_configure_sleepy_behavior(true);
-    		zb_zdo_pim_set_long_poll_interval(
-    			ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_LONG_POLL_MS));
+    		zb_zdo_pim_set_long_poll_interval(SED_LONG_POLL_MS);
     		LOG_INF("OTA mode: SLEEPY");
     	}
 }
