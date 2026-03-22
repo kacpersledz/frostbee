@@ -49,8 +49,8 @@ extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
 LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
 #define REPORT_INTERVAL_S      15
-#define SED_KEEPALIVE_MS       3000
-#define OTA_KEEPALIVE_MS       100
+#define SED_LONG_POLL_MS       3000
+#define OTA_LONG_POLL_MS       500
 
 #define BUTTON_DEBOUNCE_MS         100
 #define BUTTON_SHORT_PRESS_MAX_MS  1000
@@ -221,7 +221,7 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260308", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260322", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
@@ -608,23 +608,15 @@ static void confirm_running_image(void)
 
 static void set_ota_transfer_mode(bool enabled)
 {
-	if (enabled) {
-		/* Keep poll traffic dense during OTA chunk transfer. On a sleepy end
-		 * device, disabling sleepy behavior alone may still leave parent polling
-		 * too sparse until the stack fully transitions, which hurts throughput.
-		 */
-		zb_set_keepalive_timeout(
-			ZB_MILLISECONDS_TO_BEACON_INTERVAL(OTA_KEEPALIVE_MS));
-		zigbee_configure_sleepy_behavior(false);
-		LOG_INF("OTA transfer mode enabled (sleep off, keepalive %d ms)",
-			OTA_KEEPALIVE_MS);
-	} else {
-		zb_set_keepalive_timeout(
-			ZB_MILLISECONDS_TO_BEACON_INTERVAL(SED_KEEPALIVE_MS));
-		zigbee_configure_sleepy_behavior(true);
-		LOG_INF("OTA transfer mode disabled (sleep on, keepalive %d ms)",
-			SED_KEEPALIVE_MS);
-	}
+    if (enabled) {
+    		zigbee_configure_sleepy_behavior(false);
+    		zb_zdo_pim_set_long_poll_interval(OTA_LONG_POLL_MS);
+    		LOG_INF("OTA mode: FAST");
+    	} else {
+    		zigbee_configure_sleepy_behavior(true);
+    		zb_zdo_pim_set_long_poll_interval(SED_LONG_POLL_MS);
+    		LOG_INF("OTA mode: SLEEPY");
+    	}
 }
 
 #if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
