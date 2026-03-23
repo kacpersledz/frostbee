@@ -373,8 +373,8 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
     uint8_t series_count = dev_ctx.battery_series_count;
-    if (series_count == 0) {
-        LOG_WRN("Invalid series count (0), defaulting to 1 to prevent crash");
+    if (series_count < 1 || series_count > 4) {
+        LOG_WRN("Series count %u out of range (1-4). Defaulting to 1.", series_count);
         series_count = 1;
     }
 
