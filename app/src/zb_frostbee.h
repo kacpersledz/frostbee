@@ -123,4 +123,10 @@
 		0,                                              \
 		NULL)
 
+enum frostbee_battery_type {
+    BATTERY_TYPE_ALKALINE = 0,
+    BATTERY_TYPE_NIMH = 1,
+    BATTERY_TYPE_LITHIUM = 2,
+};
+
 #endif /* ZB_FROSTBEE_H */

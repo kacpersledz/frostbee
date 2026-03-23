@@ -63,9 +63,6 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 #define ADC_GAIN_FACTOR 6
 #define VDIV_FACTOR     2
 
-/* OTA smoke-test override: force reported battery to 3.6V. Revert after test. */
-#define FROSTBEE_FORCE_BATTERY_MV 3600
-
 #define FROSTBEE_TEMP_MIN_VALUE  (-4000)
 #define FROSTBEE_TEMP_MAX_VALUE  12500
 #define FROSTBEE_HUM_MIN_VALUE   0
@@ -76,6 +73,8 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 struct zb_device_ctx {
 	zb_zcl_basic_attrs_ext_t basic_attr;
 	zb_zcl_identify_attrs_t identify_attr;
+	zb_uint8_t battery_type;         /* ID 0xff01 */
+    zb_uint8_t battery_series_count; /* ID 0xff02 */
 	zb_uint8_t battery_voltage;
 	zb_uint8_t battery_percentage;
 	zb_int16_t temp_measure_value;
@@ -161,6 +160,20 @@ static zb_zcl_attr_t power_config_attr_list[] = {
 		(void *)&dev_ctx.battery_percentage
 	},
 	{
+        0xff01, // Battery Type
+        ZB_ZCL_ATTR_TYPE_U8,
+        ZB_ZCL_ATTR_ACCESS_READ_WRITE,
+        ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
+        (void *)&dev_ctx.battery_type
+    },
+    {
+        0xff02, // Series Count
+        ZB_ZCL_ATTR_TYPE_U8,
+        ZB_ZCL_ATTR_ACCESS_READ_WRITE,
+        ZB_ZCL_NON_MANUFACTURER_SPECIFIC,
+        (void *)&dev_ctx.battery_series_count
+    },
+	{
 		ZB_ZCL_NULL_ID,
 		0,
 		0,
@@ -221,7 +234,7 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260322", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260323", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
@@ -239,6 +252,10 @@ static void clusters_attr_init(void)
 	dev_ctx.hum_measure_value = ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_UNKNOWN;
 	dev_ctx.hum_min_value = FROSTBEE_HUM_MIN_VALUE;
 	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
+
+	dev_ctx.battery_type = BATTERY_TYPE_ALKALINE;
+	// To be changed in final version
+    dev_ctx.battery_series_count = 3;
 }
 
 static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
@@ -278,31 +295,49 @@ static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
 	return 0;
 }
 
+static zb_uint8_t interpolate(int32_t x, int32_t x_low, int32_t y_low, int32_t x_high, int32_t y_high) {
+    if (x <= x_low) return y_low;
+    if (x >= x_high) return y_high;
+
+    return (zb_uint8_t)(y_low + (y_high - y_low) * (x - x_low) / (x_high - x_low));
+}
+
+static zb_uint8_t calculate_pct_from_lookup(int32_t mv, zb_uint8_t type) {
+    if (type == BATTERY_TYPE_LITHIUM) {
+        if (mv >= 1700) return 200;
+        if (mv >= 1600) return interpolate(mv, 1600, 190, 1700, 200);
+        if (mv >= 1500) return interpolate(mv, 1500, 170, 1600, 190);
+        if (mv >= 1400) return interpolate(mv, 1400, 140, 1500, 170);
+        if (mv >= 1300) return interpolate(mv, 1300, 90, 1400, 140);
+        if (mv >= 1200) return interpolate(mv, 1200, 20, 1300, 90);
+        return 0;
+    } else if (type == BATTERY_TYPE_NIMH) {
+        if (mv >= 1400) return 200;
+        if (mv >= 1300) return interpolate(mv, 1300, 180, 1400, 200);
+        if (mv >= 1250) return interpolate(mv, 1250, 150, 1300, 180);
+        if (mv >= 1200) return interpolate(mv, 1200, 120, 1250, 150);
+        if (mv >= 1150) return interpolate(mv, 1150, 80, 1200, 120);
+        if (mv >= 1100) return interpolate(mv, 1100, 30, 1150, 80);
+        if (mv >= 1000) return interpolate(mv, 1000, 0, 1100, 30);
+        return 0;
+    } else { // Alkaline
+        if (mv >= 1600) return 200;
+        if (mv >= 1500) return interpolate(mv, 1500, 180, 1600, 200);
+        if (mv >= 1400) return interpolate(mv, 1400, 150, 1500, 180);
+        if (mv >= 1300) return interpolate(mv, 1300, 110, 1400, 150);
+        if (mv >= 1200) return interpolate(mv, 1200, 70, 1300, 110);
+        if (mv >= 1100) return interpolate(mv, 1100, 30, 1200, 70);
+        if (mv >= 1000) return interpolate(mv, 1000, 0, 1100, 30);
+        return 0;
+    }
+}
+
 static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zcl)
 {
 	int ret;
 	int16_t samples[5];
 	int32_t adc_mv;
 	int32_t battery_mv;
-	int32_t percentage_raw;
-
-	if (FROSTBEE_FORCE_BATTERY_MV > 0) {
-		battery_mv = FROSTBEE_FORCE_BATTERY_MV;
-		*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
-
-		percentage_raw = ((battery_mv - 3000) * 200) / 1500;
-		if (percentage_raw < 0) {
-			percentage_raw = 0;
-		}
-		if (percentage_raw > 200) {
-			percentage_raw = 200;
-		}
-		*battery_pct_zcl = (zb_uint8_t)percentage_raw;
-
-		LOG_INF("Battery override: %d mV (ZCL=%u), %u%% (ZCL=%u)",
-			battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
-		return 0;
-	}
 
 	if (!device_is_ready(adc_dev)) {
 		return -ENODEV;
@@ -337,14 +372,14 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	battery_mv = adc_mv * VDIV_FACTOR;
 	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
-	percentage_raw = ((battery_mv - 3000) * 200) / 1500;
-	if (percentage_raw < 0) {
-		percentage_raw = 0;
-	}
-	if (percentage_raw > 200) {
-		percentage_raw = 200;
-	}
-	*battery_pct_zcl = (zb_uint8_t)percentage_raw;
+    uint8_t series_count = dev_ctx.battery_series_count;
+    if (series_count < 1 || series_count > 4) {
+        LOG_WRN("Series count %u out of range (1-4). Defaulting to 1.", series_count);
+        series_count = 1;
+    }
+
+    int32_t mv_per_cell = battery_mv / series_count;
+    *battery_pct_zcl = calculate_pct_from_lookup(mv_per_cell, dev_ctx.battery_type);
 
 	LOG_INF("Battery: %d mV (ZCL=%u), %u%% (ZCL=%u)",
 		battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
