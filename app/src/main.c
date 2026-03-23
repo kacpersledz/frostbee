@@ -372,7 +372,13 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	battery_mv = adc_mv * VDIV_FACTOR;
 	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
-    int32_t mv_per_cell = battery_mv / dev_ctx.battery_series_count;
+    uint8_t series_count = dev_ctx.battery_series_count;
+    if (series_count == 0) {
+        LOG_WRN("Invalid series count (0), defaulting to 1 to prevent crash");
+        series_count = 1;
+    }
+
+    int32_t mv_per_cell = battery_mv / series_count;
     *battery_pct_zcl = calculate_pct_from_lookup(mv_per_cell, dev_ctx.battery_type);
 
 	LOG_INF("Battery: %d mV (ZCL=%u), %u%% (ZCL=%u)",
