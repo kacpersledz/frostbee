@@ -372,8 +372,6 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	battery_mv = adc_mv * VDIV_FACTOR;
 	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
-    battery_mv = adc_mv * VDIV_FACTOR;
-    *battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
     int32_t mv_per_cell = battery_mv / dev_ctx.battery_series_count;
     *battery_pct_zcl = calculate_pct_from_lookup(mv_per_cell, dev_ctx.battery_type);
 
