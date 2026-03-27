@@ -48,7 +48,8 @@ extern zb_af_endpoint_desc_t zigbee_fota_client_ep;
 
 LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
-#define REPORT_INTERVAL_S      15
+#define SENSOR_READ_INTERVAL_S   600
+#define BATTERY_READ_INTERVAL_S  64800
 #define SED_LONG_POLL_MS       3000
 #define OTA_LONG_POLL_MS       500
 
@@ -110,6 +111,7 @@ static uint32_t forced_reports_requested;
 static uint32_t forced_reports_attempted;
 static uint32_t forced_reports_completed;
 static uint32_t forced_reports_failed;
+static uint32_t battery_elapsed_s = BATTERY_READ_INTERVAL_S;
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -387,7 +389,7 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	return 0;
 }
 
-static void measurement_update(zb_bool_t force_report)
+static void measurement_update(zb_bool_t force_report, zb_bool_t include_battery)
 {
 	zb_int16_t temp_centi;
 	zb_uint16_t hum_centi;
@@ -411,20 +413,23 @@ static void measurement_update(zb_bool_t force_report)
 		return;
 	}
 
-	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
-	if (ret < 0) {
-		LOG_ERR("Battery read failed: %d", ret);
-		if (force_report) {
-			forced_reports_failed++;
+	if (include_battery) {
+		ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
+		if (ret < 0) {
+			LOG_ERR("Battery read failed: %d", ret);
+			if (force_report) {
+				forced_reports_failed++;
+			}
+			k_mutex_unlock(&sensor_mutex);
+			return;
 		}
-		k_mutex_unlock(&sensor_mutex);
-		return;
+
+		dev_ctx.battery_voltage = battery_zcl;
+		dev_ctx.battery_percentage = battery_pct_zcl;
 	}
 
 	dev_ctx.temp_measure_value = temp_centi;
 	dev_ctx.hum_measure_value = hum_centi;
-	dev_ctx.battery_voltage = battery_zcl;
-	dev_ctx.battery_percentage = battery_pct_zcl;
 
 	ZB_ZCL_SET_ATTRIBUTE(
 		FROSTBEE_ENDPOINT,
@@ -442,21 +447,23 @@ static void measurement_update(zb_bool_t force_report)
 		(zb_uint8_t *)&dev_ctx.hum_measure_value,
 		force_report);
 
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
-		(zb_uint8_t *)&dev_ctx.battery_voltage,
-		force_report);
+	if (include_battery) {
+		ZB_ZCL_SET_ATTRIBUTE(
+			FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+			(zb_uint8_t *)&dev_ctx.battery_voltage,
+			force_report);
 
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-		(zb_uint8_t *)&dev_ctx.battery_percentage,
-		force_report);
+		ZB_ZCL_SET_ATTRIBUTE(
+			FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+			(zb_uint8_t *)&dev_ctx.battery_percentage,
+			force_report);
+	}
 
 	if (force_report) {
 		forced_reports_completed++;
@@ -473,17 +480,24 @@ static void measurement_update(zb_bool_t force_report)
 static void measurement_now_cb(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
-	measurement_update(ZB_TRUE);
+	measurement_update(ZB_TRUE, ZB_TRUE);
 }
 
 static void measurement_periodic(zb_bufid_t bufid)
 {
+	zb_bool_t include_battery = ZB_FALSE;
+
 	ARG_UNUSED(bufid);
 	if (!ota_in_progress) {
-		measurement_update(ZB_FALSE);
+		battery_elapsed_s += SENSOR_READ_INTERVAL_S;
+		if (battery_elapsed_s >= BATTERY_READ_INTERVAL_S) {
+			include_battery = ZB_TRUE;
+			battery_elapsed_s = 0;
+		}
+		measurement_update(ZB_FALSE, include_battery);
 	}
 	ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
-			      (zb_time_t)REPORT_INTERVAL_S *
+			      (zb_time_t)SENSOR_READ_INTERVAL_S *
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
@@ -702,12 +716,13 @@ void zboss_signal_handler(zb_bufid_t bufid)
 		if (status == RET_OK) {
 			zigbee_network_ready = true;
 			confirm_running_image();
-			LOG_INF("Zigbee joined/rejoined (signal=%d), reporting each %ds",
-				sig, REPORT_INTERVAL_S);
+			LOG_INF("Zigbee joined/rejoined (signal=%d), sensor=%us battery=%us",
+				sig, SENSOR_READ_INTERVAL_S, BATTERY_READ_INTERVAL_S);
 			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
-			measurement_update(ZB_FALSE);
+			battery_elapsed_s = 0;
+			measurement_update(ZB_FALSE, ZB_TRUE);
 			ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
-					      (zb_time_t)REPORT_INTERVAL_S *
+					      (zb_time_t)SENSOR_READ_INTERVAL_S *
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 		} else {
 			LOG_WRN("Zigbee signal %d status=%d", sig, status);
@@ -791,7 +806,8 @@ int main(void)
 
 	zigbee_enable();
 
-	LOG_INF("Zigbee enabled (%s, %ds reporting)", FROSTBEE_SW_VERSION, REPORT_INTERVAL_S);
+	LOG_INF("Zigbee enabled (%s, sensor=%us battery=%us)",
+		FROSTBEE_SW_VERSION, SENSOR_READ_INTERVAL_S, BATTERY_READ_INTERVAL_S);
 
 	while (1) {
 		k_sleep(K_FOREVER);
