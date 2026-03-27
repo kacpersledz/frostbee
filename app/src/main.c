@@ -111,7 +111,6 @@ static uint32_t forced_reports_requested;
 static uint32_t forced_reports_attempted;
 static uint32_t forced_reports_completed;
 static uint32_t forced_reports_failed;
-static uint32_t battery_elapsed_s = BATTERY_READ_INTERVAL_S;
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -389,43 +388,19 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	return 0;
 }
 
-static void measurement_update(zb_bool_t force_report, zb_bool_t include_battery)
+static int sensor_report(zb_bool_t force_report)
 {
 	zb_int16_t temp_centi;
 	zb_uint16_t hum_centi;
-	zb_uint8_t battery_zcl;
-	zb_uint8_t battery_pct_zcl;
 	int ret;
-
-	if (force_report) {
-		forced_reports_attempted++;
-	}
 
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
 	ret = read_sensor_once(&temp_centi, &hum_centi);
 	if (ret < 0) {
 		LOG_ERR("Sensor read failed: %d", ret);
-		if (force_report) {
-			forced_reports_failed++;
-		}
 		k_mutex_unlock(&sensor_mutex);
-		return;
-	}
-
-	if (include_battery) {
-		ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
-		if (ret < 0) {
-			LOG_ERR("Battery read failed: %d", ret);
-			if (force_report) {
-				forced_reports_failed++;
-			}
-			k_mutex_unlock(&sensor_mutex);
-			return;
-		}
-
-		dev_ctx.battery_voltage = battery_zcl;
-		dev_ctx.battery_percentage = battery_pct_zcl;
+		return ret;
 	}
 
 	dev_ctx.temp_measure_value = temp_centi;
@@ -447,57 +422,100 @@ static void measurement_update(zb_bool_t force_report, zb_bool_t include_battery
 		(zb_uint8_t *)&dev_ctx.hum_measure_value,
 		force_report);
 
-	if (include_battery) {
-		ZB_ZCL_SET_ATTRIBUTE(
-			FROSTBEE_ENDPOINT,
-			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-			ZB_ZCL_CLUSTER_SERVER_ROLE,
-			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
-			(zb_uint8_t *)&dev_ctx.battery_voltage,
-			force_report);
+	k_mutex_unlock(&sensor_mutex);
+	return 0;
+}
 
-		ZB_ZCL_SET_ATTRIBUTE(
-			FROSTBEE_ENDPOINT,
-			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-			ZB_ZCL_CLUSTER_SERVER_ROLE,
-			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-			(zb_uint8_t *)&dev_ctx.battery_percentage,
-			force_report);
+static int battery_report(zb_bool_t force_report)
+{
+	zb_uint8_t battery_zcl;
+	zb_uint8_t battery_pct_zcl;
+	int ret;
+
+	k_mutex_lock(&sensor_mutex, K_FOREVER);
+
+	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
+	if (ret < 0) {
+		LOG_ERR("Battery read failed: %d", ret);
+		k_mutex_unlock(&sensor_mutex);
+		return ret;
 	}
 
+	dev_ctx.battery_voltage = battery_zcl;
+	dev_ctx.battery_percentage = battery_pct_zcl;
+
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+		(zb_uint8_t *)&dev_ctx.battery_voltage,
+		force_report);
+
+	ZB_ZCL_SET_ATTRIBUTE(
+		FROSTBEE_ENDPOINT,
+		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_CLUSTER_SERVER_ROLE,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+		(zb_uint8_t *)&dev_ctx.battery_percentage,
+		force_report);
+
+	k_mutex_unlock(&sensor_mutex);
+	return 0;
+}
+
+static void measurement_update(zb_bool_t force_report)
+{
+	int ret_sensor;
+	int ret_battery;
+
 	if (force_report) {
-		forced_reports_completed++;
+		forced_reports_attempted++;
+	}
+
+	ret_sensor = sensor_report(force_report);
+	ret_battery = battery_report(force_report);
+
+	if (force_report) {
+		if ((ret_sensor < 0) || (ret_battery < 0)) {
+			forced_reports_failed++;
+		} else {
+			forced_reports_completed++;
+		}
+
 		LOG_INF("Forced report counters: requested=%u attempted=%u completed=%u failed=%u",
 			forced_reports_requested,
 			forced_reports_attempted,
 			forced_reports_completed,
 			forced_reports_failed);
 	}
-
-	k_mutex_unlock(&sensor_mutex);
 }
 
 static void measurement_now_cb(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
-	measurement_update(ZB_TRUE, ZB_TRUE);
+	measurement_update(ZB_TRUE);
 }
 
-static void measurement_periodic(zb_bufid_t bufid)
+static void sensor_periodic(zb_bufid_t bufid)
 {
-	zb_bool_t include_battery = ZB_FALSE;
-
 	ARG_UNUSED(bufid);
 	if (!ota_in_progress) {
-		battery_elapsed_s += SENSOR_READ_INTERVAL_S;
-		if (battery_elapsed_s >= BATTERY_READ_INTERVAL_S) {
-			include_battery = ZB_TRUE;
-			battery_elapsed_s = 0;
-		}
-		measurement_update(ZB_FALSE, include_battery);
+		sensor_report(ZB_FALSE);
 	}
-	ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
+	ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 			      (zb_time_t)SENSOR_READ_INTERVAL_S *
+			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+}
+
+static void battery_periodic(zb_bufid_t bufid)
+{
+	ARG_UNUSED(bufid);
+	if (!ota_in_progress) {
+		battery_report(ZB_FALSE);
+	}
+	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
+			      (zb_time_t)BATTERY_READ_INTERVAL_S *
 			      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 }
 
@@ -718,11 +736,14 @@ void zboss_signal_handler(zb_bufid_t bufid)
 			confirm_running_image();
 			LOG_INF("Zigbee joined/rejoined (signal=%d), sensor=%us battery=%us",
 				sig, SENSOR_READ_INTERVAL_S, BATTERY_READ_INTERVAL_S);
-			ZB_SCHEDULE_APP_ALARM_CANCEL(measurement_periodic, 0);
-			battery_elapsed_s = 0;
-			measurement_update(ZB_FALSE, ZB_TRUE);
-			ZB_SCHEDULE_APP_ALARM(measurement_periodic, 0,
-					      (zb_time_t)SENSOR_READ_INTERVAL_S *
+			ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
+			ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
+			measurement_update(ZB_FALSE);
+			ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
+						      (zb_time_t)SENSOR_READ_INTERVAL_S *
+						      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
+			ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
+					      (zb_time_t)BATTERY_READ_INTERVAL_S *
 					      ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 		} else {
 			LOG_WRN("Zigbee signal %d status=%d", sig, status);
