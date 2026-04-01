@@ -235,7 +235,7 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260323", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260401", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
@@ -255,8 +255,7 @@ static void clusters_attr_init(void)
 	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
 
 	dev_ctx.battery_type = BATTERY_TYPE_ALKALINE;
-	// To be changed in final version
-    dev_ctx.battery_series_count = 3;
+    dev_ctx.battery_series_count = 2;
 }
 
 static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
