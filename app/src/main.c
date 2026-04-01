@@ -766,6 +766,39 @@ void zboss_signal_handler(zb_bufid_t bufid)
 	}
 }
 
+static void frostbee_zcl_cb(zb_uint8_t param)
+{
+    zb_zcl_device_callback_param_t *device_cb_param =
+        ZB_BUF_GET_PARAM(param, zb_zcl_device_callback_param_t);
+
+    /* Check if an attribute was written to over-the-air */
+    if (device_cb_param->device_cb_id == ZB_ZCL_SET_ATTR_VALUE_CB_ID) {
+        zb_zcl_set_attr_value_param_t *set_attr_param =
+            &device_cb_param->cb_param.set_attr_value_param;
+
+        /* Check if the write was to our Power Config cluster */
+        if (set_attr_param->cluster_id == ZB_ZCL_CLUSTER_ID_POWER_CONFIG) {
+
+            /* If it's our Battery Type or Series Count */
+            if (set_attr_param->attr_id == 0xff01 || set_attr_param->attr_id == 0xff02) {
+                LOG_INF("Battery configuration changed (Attr: 0x%04x). Recalculating...",
+                        set_attr_param->attr_id);
+
+                /* * Trigger an immediate measurement.
+                 * measurement_update(ZB_TRUE) calls read_battery_once(),
+                 * which pulls the fresh values directly from dev_ctx.
+                 */
+                ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
+            }
+        }
+    }
+
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+    /* Ensure FOTA callback still gets processed if FOTA is enabled */
+    zigbee_fota_zcl_cb(param);
+#endif
+}
+
 int main(void)
 {
 	int ret;
@@ -819,8 +852,10 @@ int main(void)
 		LOG_ERR("zigbee_fota_init failed: %d", ret);
 		return ret;
 	}
-	ZB_ZCL_REGISTER_DEVICE_CB(zigbee_fota_zcl_cb);
 #endif
+
+    /* Register our custom callback to handle attribute writes */
+    ZB_ZCL_REGISTER_DEVICE_CB(frostbee_zcl_cb);
 
 	ZB_AF_REGISTER_DEVICE_CTX(&frostbee_ctx);
 	running_image_confirmed = boot_is_img_confirmed();
