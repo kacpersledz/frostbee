@@ -137,7 +137,7 @@ Add to `configuration.yaml`:
 
 ```yaml
 ota:
-  zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
+  zigbee_ota_override_index_location: https://raw.githubusercontent.com/kacpersledz/frostbee/master/ota_index.json
   update_check_interval: 1440
 ```
 
