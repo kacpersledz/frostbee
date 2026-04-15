@@ -34,12 +34,23 @@ on:
       - 'v*.*.*'
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     container:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
+
+    strategy:
+      matrix:
+        variant:
+          - name: sht40
+            overlay: boards/sht40.overlay
+            model: FBE_TH_1
+            image_type: 1
+          - name: bme280
+            overlay: boards/bme280.overlay
+            model: FBE_TH_2
+            image_type: 2
+
     defaults:
       run:
         shell: bash
@@ -64,116 +75,112 @@ jobs:
           west init sdk -m https://github.com/nrfconnect/ncs-zigbee --mr v1.2.1
           cd sdk && west update --narrow -o=--depth=1
 
-      - name: Compute version
-        id: ver
-        run: |
-          TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
-          ARTIFACT="frostbee-${TAG}.zigbee"
-          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
-
       - name: Write VERSION file
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${TAG#v}"
-          printf 'VERSION_MAJOR = %s\nVERSION_MINOR = %s\nPATCHLEVEL = %s\nVERSION_TWEAK = 0\n' \
-            "$MAJOR" "$MINOR" "$PATCH" > app/app/VERSION
-          echo "--- app/app/VERSION ---"
-          cat app/app/VERSION
+          RAW_VER="${GITHUB_REF_NAME#v}"
 
-      # If MCUBOOT_SIGNING_KEY secret is set, use it; otherwise the NCS
-      # default development key is used (fine for testing, not for production).
-      - name: Write signing key
-        env:
-          MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
-        run: |
-          if [[ -n "$MCUBOOT_SIGNING_KEY" ]]; then
-            mkdir -p app/app/keys
-            printf '%s' "$MCUBOOT_SIGNING_KEY" > app/app/keys/signing.pem
+          if [[ "$RAW_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Valid version detected: $RAW_VER"
+            MAJOR=$(echo "$RAW_VER" | cut -d. -f1)
+            MINOR=$(echo "$RAW_VER" | cut -d. -f2)
+            PATCH=$(echo "$RAW_VER" | cut -d. -f3)
+          else
+            echo "Ref '$RAW_VER' is not a version. Using 0.0.0."
+            MAJOR=0; MINOR=0; PATCH=0
           fi
+
+          printf 'VERSION_MAJOR = %d\nVERSION_MINOR = %d\nPATCHLEVEL = %d\nVERSION_TWEAK = 0\n' \
+            "${MAJOR:-0}" "${MINOR:-0}" "${PATCH:-0}" > app/app/VERSION
+          
+          echo "--- app/app/VERSION content ---"
+          cat app/app/VERSION
 
       - name: Build firmware
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
         run: |
-          ARGS=()
+          REPO_ROOT=$(pwd)/app
+
+          OVERLAY_PATH="$REPO_ROOT/app/${{ matrix.variant.overlay }}"
+          echo "Looking for overlay at: $OVERLAY_PATH"
+
+          ARGS=("-DDTC_OVERLAY_FILE=$OVERLAY_PATH")
+          ARGS+=("-DCONFIG_ZIGBEE_FOTA_IMAGE_TYPE=${{ matrix.variant.image_type }}")
+          ARGS+=("-DCONFIG_FROSTBEE_MODEL_ID=\"${{ matrix.variant.model }}\"")
+          
           if [[ -n "$SIGNING_KEY" ]]; then
-            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
+            mkdir -p "$REPO_ROOT/app/keys"
+            printf '%s' "$SIGNING_KEY" > "$REPO_ROOT/app/keys/signing.pem"
+            ARGS+=("-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$REPO_ROOT/app/keys/signing.pem\"")
           fi
+          
           cd sdk && west build \
+            -p always \
             -b nrf52840dongle/nrf52840 \
             ../app/app \
-            --build-dir ../build \
+            --build-dir ../build-${{ matrix.variant.name }} \
             -- "${ARGS[@]}"
 
-      - name: Merge MBR into merged.hex
+      - name: Prepare Artifacts
         run: |
-          python3 sdk/zephyr/scripts/build/mergehex.py \
-            --overlap=replace \
-            build/merged.hex \
+          # Merge MBR
+          python3 sdk/zephyr/scripts/build/mergehex.py --overlap=replace \
+            build-${{ matrix.variant.name }}/merged.hex \
             app/app/nice_nano_mbr.hex \
-            -o build/frostbee_complete.hex
+            -o build-${{ matrix.variant.name }}/frostbee_${{ matrix.variant.name }}_complete.hex
+          
+          # Rename Zigbee file to include variant and tag
+          cp build-${{ matrix.variant.name }}/*.zigbee frostbee-${{ matrix.variant.name }}-${{ github.ref_name }}.zigbee
 
-      - name: Rename Zigbee OTA file
-        id: ota
-        env:
-          ARTIFACT: ${{ steps.ver.outputs.artifact }}
-        run: |
-          cp build/*.zigbee "$ARTIFACT"
-          cp "$ARTIFACT" frostbee.zigbee
-          ZIGBEE_NAME=$(basename build/*.zigbee)
-          FILE_VER_HEX="0x$(echo "$ZIGBEE_NAME" | cut -d'-' -f3)"
-          FILE_VER_DEC=$((16#$(echo "$ZIGBEE_NAME" | cut -d'-' -f3)))
-          echo "file_ver_hex=$FILE_VER_HEX" >> "$GITHUB_OUTPUT"
-          echo "file_ver_dec=$FILE_VER_DEC" >> "$GITHUB_OUTPUT"
-
-      - name: Upload build artifacts
+      - name: Upload temporary artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: frostbee-${{ github.sha }}
+          name: release-files-${{ matrix.variant.name }}
           path: |
-            build/frostbee_complete.hex
-            ${{ steps.ver.outputs.artifact }}
-          if-no-files-found: warn
+            build-${{ matrix.variant.name }}/frostbee_${{ matrix.variant.name }}_complete.hex
+            frostbee-${{ matrix.variant.name }}-${{ github.ref_name }}.zigbee
 
-      - name: Update OTA index on master
-        env:
-          ARTIFACT: ${{ steps.ver.outputs.artifact }}
-          FILE_VER: ${{ steps.ota.outputs.file_ver_dec }}
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master # We need master to update the index
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-files-*
+          merge-multiple: true
+
+      - name: Update OTA index
         run: |
-          cd app
-          printf '[
-            {
-              "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",
-              "manufacturerCode": 4660,
-              "imageType": 1,
-              "fileVersion": %s
-            }
-          ]\n' "$ARTIFACT" "$FILE_VER" > ota_index.json
+          # Extract file versions from the .zigbee filenames
+          # Zigbee filenames are: mfr-type-version-comment.zigbee
+          
+          SHT_FILE=$(ls frostbee-sht40-*.zigbee)
+          SHT_VER_DEC=$((16#$(echo "$SHT_FILE" | cut -d'-' -f4)))
+          
+          BME_FILE=$(ls frostbee-bme280-*.zigbee)
+          BME_VER_DEC=$((16#$(echo "$BME_FILE" | cut -d'-' -f4)))
+          
+          printf '[\n  {\n    "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",\n    "manufacturerCode": 4660,\n    "imageType": 1,\n    "fileVersion": %s\n  },\n  {\n    "url": "https://github.com/winterberryice/frostbee/releases/latest/download/%s",\n    "manufacturerCode": 4660,\n    "imageType": 2,\n    "fileVersion": %s\n  }\n]\n' \
+            "$SHT_FILE" "$SHT_VER_DEC" "$BME_FILE" "$BME_VER_DEC" > ota_index.json
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ota_index.json
-          git diff --cached --quiet || {
-            git commit -m "chore: update OTA index for ${GITHUB_REF_NAME}"
-            git push origin HEAD:master
-          }
-        continue-on-error: true
+          git commit -m "chore: update OTA index for ${GITHUB_REF_NAME}" || echo "No changes"
+          git push origin master
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/frostbee_complete.hex
-            ${{ steps.ver.outputs.artifact }}
-            frostbee.zigbee
+            *.hex
+            *.zigbee
           generate_release_notes: true
-          body: |
-            ## Zigbee OTA — automatic update
-
-            Z2M will pick this up automatically if configured with:
-            ```yaml
-            ota:
-              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
-              update_check_interval: 1440
-            ```
-
-            **Zigbee OTA file version:** `${{ steps.ota.outputs.file_ver_hex }}` (`${{ steps.ota.outputs.file_ver_dec }}`)

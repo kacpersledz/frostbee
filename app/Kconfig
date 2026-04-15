@@ -1,0 +1,8 @@
+# Import the main Zephyr Kconfig rules
+source "Kconfig.zephyr"
+
+config FROSTBEE_MODEL_ID
+    string "Frostbee Model Identifier"
+    default "FBE_UNKNOWN"
+    help
+      This string is passed to the Zigbee Basic Cluster Model ID attribute.

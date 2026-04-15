@@ -1,0 +1,85 @@
+/ {
+    chosen {
+        ncs,zigbee-timer = &timer2;
+    };
+
+    leds {
+        compatible = "gpio-leds";
+        led0_green: led_0 {
+            gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+            label = "Blue LED";
+        };
+    };
+
+    buttons {
+        compatible = "gpio-keys";
+        reset_button: button_0 {
+            gpios = <&gpio0 31 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Reset button";
+        };
+    };
+
+    aliases {
+        led0 = &led0_green;
+        sw0 = &reset_button;
+        th-sensor = &sensor_on_i2c;
+    };
+
+    vbat {
+        compatible = "voltage-divider";
+        io-channels = <&adc 5>;
+        output-ohms = <10000>;
+        full-ohms = <20000>;
+    };
+
+    vbat_enable {
+        compatible = "gpio-leds";
+        vbat_en: vbat_enable_pin {
+            gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+            label = "Battery voltage divider enable";
+        };
+    };
+};
+
+&adc {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+
+    channel@5 {
+        reg = <5>;
+        zephyr,gain = "ADC_GAIN_1_6";
+        zephyr,reference = "ADC_REF_INTERNAL";
+        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+        zephyr,input-positive = <NRF_SAADC_AIN5>;
+        zephyr,resolution = <12>;
+    };
+};
+
+&i2c0 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    pinctrl-0 = <&i2c0_default>;
+    pinctrl-1 = <&i2c0_sleep>;
+    pinctrl-names = "default", "sleep";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+&pinctrl {
+    i2c0_default: i2c0_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 24)>,
+                    <NRF_PSEL(TWIM_SCL, 1, 0)>;
+        };
+    };
+
+    i2c0_sleep: i2c0_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 24)>,
+                    <NRF_PSEL(TWIM_SCL, 1, 0)>;
+            low-power-enable;
+        };
+    };
+};
+
+&timer2 { status = "okay"; };

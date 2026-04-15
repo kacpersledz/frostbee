@@ -103,21 +103,51 @@ openocd -f interface/stlink.cfg -f target/nrf52.cfg \
 ### Building and flashing locally
 
 ```bash
+### Choose variant: 
+# - SHT40 → FBE_TH_1 
+# - BME280 → FBE_TH_2
+
 # 1. Build
-west build -b nrf52840dongle/nrf52840 app --build-dir app/build
+# --- SHT40 --- 
+west build -b nrf52840dongle/nrf52840 app \ 
+  --build-dir app/build-sht40 \ 
+  -- \ 
+  -DDTC_OVERLAY_FILE=app/boards/sht40.overlay \ 
+  -DFROSTBEE_MODEL_ID=\"FBE_TH_1\" 
+  
+# --- BME280 --- 
+west build -b nrf52840dongle/nrf52840 app \ 
+  --build-dir app/build-bme280 \ 
+  -- \ -DDTC_OVERLAY_FILE=app/boards/bme280.overlay \ 
+  -DFROSTBEE_MODEL_ID=\"FBE_TH_2\"
 
 # 2. Merge MBR into the hex
+# --- SHT40 ---
 python3 $ZEPHYR_BASE/scripts/build/mergehex.py \
   --overlap=replace \
-  app/build/merged.hex \
+  app/build-sht40/merged.hex \
   app/nice_nano_mbr.hex \
-  -o app/build/frostbee_complete.hex
+  -o app/build-sht40/frostbee_complete.hex
+  
+# --- BME280 ---
+python3 $ZEPHYR_BASE/scripts/build/mergehex.py \
+  --overlap=replace \
+  app/build-bme280/merged.hex \
+  app/nice_nano_mbr.hex \
+  -o app/build-bme280/frostbee_complete.hex
 
 # 3. Flash
+# --- SHT40 ---
 for i in $(seq 1 15); do sleep 1; echo "$i"; done && \
 openocd -f interface/stlink.cfg -f target/nrf52.cfg \
   -c "init; reset halt; nrf5 mass_erase; \
-      program app/build/frostbee_complete.hex verify reset exit"
+      program app/build-sht40/frostbee_complete.hex verify reset exit"
+      
+# --- BME280 ---
+for i in $(seq 1 15); do sleep 1; echo "$i"; done && \
+openocd -f interface/stlink.cfg -f target/nrf52.cfg \
+  -c "init; reset halt; nrf5 mass_erase; \
+      program app/build-bme280/frostbee_complete.hex verify reset exit"
 ```
 
 After flashing, power the device from batteries and open the Zigbee network in Z2M — it will join automatically.

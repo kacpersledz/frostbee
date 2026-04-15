@@ -1,0 +1,8 @@
+#include "common.dtsi"
+
+&i2c0 {
+    sensor_on_i2c: bme280: bme280@76 {
+        compatible = "bosch,bme280";
+        reg = <0x76>;
+    };
+};

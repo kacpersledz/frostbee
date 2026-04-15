@@ -1,0 +1,9 @@
+#include "common.dtsi"
+
+&i2c0 {
+    sensor_on_i2c: sht40: sht4x@44 {
+            compatible = "sensirion,sht4x";
+            reg = <0x44>;
+    		repeatability = <2>;
+    	};
+};

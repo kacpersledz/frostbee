@@ -13,12 +13,13 @@
 #define ZB_FROSTBEE_H 1
 
 #define FROSTBEE_ENDPOINT          1
-#define FROSTBEE_IN_CLUSTER_NUM    5
+#define FROSTBEE_IN_CLUSTER_NUM    6
 #define FROSTBEE_OUT_CLUSTER_NUM   1
 
 #define FROSTBEE_REPORT_ATTR_COUNT \
 	(ZB_ZCL_TEMP_MEASUREMENT_REPORT_ATTR_COUNT + \
 	 ZB_ZCL_REL_HUMIDITY_MEASUREMENT_REPORT_ATTR_COUNT + \
+	 ZB_ZCL_PRESSURE_MEASUREMENT_REPORT_ATTR_COUNT + \
 	 2)
 
 #define ZB_DECLARE_FROSTBEE_CLUSTER_LIST(                        \
@@ -28,7 +29,8 @@
 		identify_server_attr_list,                       \
 		power_config_attr_list,                          \
 		temp_measurement_attr_list,                      \
-		humidity_attr_list)                              \
+		humidity_attr_list,                              \
+		pressure_attr_list)                              \
 	zb_zcl_cluster_desc_t cluster_list_name[] =              \
 	{                                                        \
 		ZB_ZCL_CLUSTER_DESC(                             \
@@ -69,6 +71,12 @@
 			(humidity_attr_list),                      \
 			ZB_ZCL_CLUSTER_SERVER_ROLE,                \
 			ZB_ZCL_MANUF_CODE_INVALID),                \
+		ZB_ZCL_CLUSTER_DESC( \
+            ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT, \
+            ZB_ZCL_ARRAY_SIZE(pressure_attr_list, zb_zcl_attr_t), \
+                (pressure_attr_list), \
+            ZB_ZCL_CLUSTER_SERVER_ROLE, \
+            ZB_ZCL_MANUF_CODE_INVALID), \
 		ZB_ZCL_CLUSTER_DESC(                             \
 			ZB_ZCL_CLUSTER_ID_IDENTIFY,              \
 			ZB_ZCL_ARRAY_SIZE(                       \
@@ -97,6 +105,7 @@
 			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,                           \
 			ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,                       \
 			ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,               \
+			ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,                   \
 			ZB_ZCL_CLUSTER_ID_IDENTIFY,                               \
 		}                                                                 \
 	}
