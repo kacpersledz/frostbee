@@ -18,6 +18,19 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v2.9.2
+
+    strategy:
+      matrix:
+        variant:
+          - name: sht40
+            overlay: boards/sht40.overlay
+            model: FBE_TH_1
+            image_type: 1
+          - name: bme280
+            overlay: boards/bme280.overlay
+            model: FBE_TH_2
+            image_type: 2
+
     defaults:
       run:
         shell: bash
@@ -45,7 +58,7 @@ jobs:
         id: ver
         run: |
           SHORT="${GITHUB_SHA::8}"
-          ARTIFACT="frostbee-dev-${SHORT}.zigbee"
+          ARTIFACT="frostbee-${{ matrix.variant.name }}-dev-${SHORT}.zigbee"
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
           echo "Version: dev sha=$SHORT"
 
@@ -71,29 +84,38 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
         run: |
-          ARGS=()
+          # 1. Initialize arguments array with matrix-specific values
+          ARGS=("-DDTC_OVERLAY_FILE=${{ matrix.variant.overlay }}")
+          ARGS+=("-DCONFIG_ZIGBEE_FOTA_IMAGE_TYPE=${{ matrix.variant.image_type }}")
+          ARGS+=("-DCONFIG_FROSTBEE_MODEL_ID=\"${{ matrix.variant.model }}\"")
+          
+          # 2. Add the signing key only if the secret is available
           if [[ -n "$SIGNING_KEY" ]]; then
-            ARGS+=(-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$(pwd)/app/app/keys/signing.pem\"")
+            # $(pwd) ensures the absolute path is passed to CMake/MCUboot
+            ARGS+=("-Dmcuboot_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"$(pwd)/app/app/keys/signing.pem\"")
           fi
+          
+          # 3. Run the build using the variable build directory
           cd sdk && west build \
+            -p always \
             -b nrf52840dongle/nrf52840 \
             ../app/app \
-            --build-dir ../build \
+            --build-dir ../build-${{ matrix.variant.name }} \
             -- "${ARGS[@]}"
 
       - name: Merge MBR into merged.hex
         run: |
           python3 sdk/zephyr/scripts/build/mergehex.py \
             --overlap=replace \
-            build/merged.hex \
+            build-${{ matrix.variant.name }}/merged.hex \
             app/app/nice_nano_mbr.hex \
-            -o build/frostbee_complete.hex
+            -o build-${{ matrix.variant.name }}/frostbee_complete.hex
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: frostbee-${{ github.sha }}
+          name: frostbee-${{ matrix.variant.name }}-${{ github.sha }}
           path: |
-            build/frostbee_complete.hex
-            build/*.zigbee
+            build-${{ matrix.variant.name }}/frostbee_complete.hex
+            build-${{ matrix.variant.name }}/*.zigbee
           if-no-files-found: warn

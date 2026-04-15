@@ -64,10 +64,13 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 #define ADC_GAIN_FACTOR 6
 #define VDIV_FACTOR     2
 
-#define FROSTBEE_TEMP_MIN_VALUE  (-4000)
-#define FROSTBEE_TEMP_MAX_VALUE  12500
-#define FROSTBEE_HUM_MIN_VALUE   0
-#define FROSTBEE_HUM_MAX_VALUE   10000
+#define FROSTBEE_TEMP_MIN_VALUE    (-4000)
+#define FROSTBEE_TEMP_MAX_VALUE    12500
+#define FROSTBEE_HUM_MIN_VALUE     0
+#define FROSTBEE_HUM_MAX_VALUE     10000
+#define FROSTBEE_PRESS_MIN_VALUE   3000
+#define FROSTBEE_PRESS_MAX_VALUE   11000
+#define FROSTBEE_PRESS_SCALE       0
 
 #define RESET_BUTTON_NODE DT_ALIAS(sw0)
 
@@ -85,11 +88,15 @@ struct zb_device_ctx {
 	zb_uint16_t hum_measure_value;
 	zb_uint16_t hum_min_value;
 	zb_uint16_t hum_max_value;
+	zb_int16_t press_measure_value;
+	zb_int16_t press_min_value;
+	zb_int16_t press_max_value;
+	zb_int8_t press_scale;
 };
 
 static struct zb_device_ctx dev_ctx;
 
-static const struct device *sht = DEVICE_DT_GET(DT_NODELABEL(sht40));
+static const struct device *sensor = DEVICE_DT_GET(DT_ALIAS(th_sensor));
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
 static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_en), gpios);
 
@@ -196,6 +203,14 @@ ZB_ZCL_DECLARE_REL_HUMIDITY_MEASUREMENT_ATTRIB_LIST(
 	&dev_ctx.hum_min_value,
 	&dev_ctx.hum_max_value);
 
+ZB_ZCL_DECLARE_PRESSURE_MEASUREMENT_ATTRIB_LIST(
+    pressure_attr_list,
+    &dev_ctx.press_measure_value,
+    &dev_ctx.press_min_value,
+    &dev_ctx.press_max_value,
+    &dev_ctx.press_scale
+);
+
 ZB_DECLARE_FROSTBEE_CLUSTER_LIST(
 	frostbee_clusters,
 	basic_attr_list,
@@ -203,7 +218,8 @@ ZB_DECLARE_FROSTBEE_CLUSTER_LIST(
 	identify_server_attr_list,
 	power_config_attr_list,
 	temp_measurement_attr_list,
-	humidity_attr_list);
+	humidity_attr_list,
+	pressure_attr_list);
 
 ZB_DECLARE_FROSTBEE_EP(
 	frostbee_ep,
@@ -234,7 +250,8 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.stack_version = 1;
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, CONFIG_FROSTBEE_MODEL_ID,
+        ZB_ZCL_STRING_CONST_SIZE(CONFIG_FROSTBEE_MODEL_ID));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260401", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
@@ -254,36 +271,51 @@ static void clusters_attr_init(void)
 	dev_ctx.hum_min_value = FROSTBEE_HUM_MIN_VALUE;
 	dev_ctx.hum_max_value = FROSTBEE_HUM_MAX_VALUE;
 
+    dev_ctx.press_min_value = FROSTBEE_PRESS_MIN_VALUE;
+	dev_ctx.press_max_value = FROSTBEE_PRESS_MAX_VALUE;
+	dev_ctx.press_scale = FROSTBEE_PRESS_SCALE;
+
 	dev_ctx.battery_type = BATTERY_TYPE_ALKALINE;
     dev_ctx.battery_series_count = 2;
 }
 
-static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
+static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi, zb_int16_t *press_hpa)
 {
 	struct sensor_value temp;
 	struct sensor_value hum;
+	struct sensor_value press;
 	int ret;
 	int64_t temp_micro;
 	int64_t hum_micro;
+	int64_t press_micro;
 
-	if (!device_is_ready(sht)) {
+	if (!device_is_ready(sensor)) {
 		return -ENODEV;
 	}
 
-	ret = sensor_sample_fetch(sht);
+	ret = sensor_sample_fetch(sensor);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ret = sensor_channel_get(sht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
+	ret = sensor_channel_get(sensor, SENSOR_CHAN_AMBIENT_TEMP, &temp);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ret = sensor_channel_get(sht, SENSOR_CHAN_HUMIDITY, &hum);
+	ret = sensor_channel_get(sensor, SENSOR_CHAN_HUMIDITY, &hum);
 	if (ret < 0) {
 		return ret;
 	}
+
+	ret = sensor_channel_get(sensor, SENSOR_CHAN_PRESS, &press);
+	if (ret == 0) {
+        press_micro = (int64_t)press.val1 * 1000000LL + press.val2;
+        *press_hpa = (zb_int16_t)((press_micro + 50000) / 100000);
+        LOG_INF("Pressure [hPa]: %d", *press_hpa);
+    } else {
+        *press_hpa = 0xFFFF; // Zigbee "Unknown"
+    }
 
 	temp_micro = (int64_t)temp.val1 * 1000000LL + temp.val2;
 	hum_micro = (int64_t)hum.val1 * 1000000LL + hum.val2;
@@ -391,11 +423,12 @@ static int sensor_report(zb_bool_t force_report)
 {
 	zb_int16_t temp_centi;
 	zb_uint16_t hum_centi;
+	zb_int16_t press_hpa;
 	int ret;
 
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
 
-	ret = read_sensor_once(&temp_centi, &hum_centi);
+	ret = read_sensor_once(&temp_centi, &hum_centi, &press_hpa);
 	if (ret < 0) {
 		LOG_ERR("Sensor read failed: %d", ret);
 		k_mutex_unlock(&sensor_mutex);
@@ -420,6 +453,17 @@ static int sensor_report(zb_bool_t force_report)
 		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
 		(zb_uint8_t *)&dev_ctx.hum_measure_value,
 		force_report);
+
+    if (press_hpa != 0xFFFF) {
+        dev_ctx.press_measure_value = press_hpa;
+        ZB_ZCL_SET_ATTRIBUTE(
+            FROSTBEE_ENDPOINT,
+            ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+            ZB_ZCL_CLUSTER_SERVER_ROLE,
+            ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
+            (zb_uint8_t *)&dev_ctx.press_measure_value,
+            force_report);
+        }
 
 	k_mutex_unlock(&sensor_mutex);
 	return 0;
@@ -802,7 +846,7 @@ int main(void)
 {
 	int ret;
 
-	LOG_INF("Frostbee production app boot (OTA package test)");
+	LOG_INF("Frostbee production app boot (%s)", CONFIG_FROSTBEE_MODEL_ID);
 
 	try_enable_usb_logs();
 
@@ -828,8 +872,8 @@ int main(void)
 		return ret;
 	}
 
-	if (!device_is_ready(sht)) {
-		LOG_ERR("SHT4X not ready");
+	if (!device_is_ready(sensor)) {
+		LOG_ERR("Sensor not ready");
 		return -ENODEV;
 	}
 
