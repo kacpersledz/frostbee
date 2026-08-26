@@ -797,7 +797,12 @@ static void recovery_attempt_cb(zb_uint8_t param)
 	}
 
 	atomic_set(&recovery_callback_running, 0);
-	recovery_schedule_next(next_delay);
+	if (atomic_get(&recovery_manual_kick)) {
+		/* A press raced with this callback after its atomic consume. */
+		k_work_reschedule(&recovery_work, K_NO_WAIT);
+	} else {
+		recovery_schedule_next(next_delay);
+	}
 }
 
 static void recovery_work_handler(struct k_work *work)
@@ -812,6 +817,7 @@ static void recovery_work_handler(struct k_work *work)
 	}
 	if (atomic_get(&recovery_callback_running) ||
 	    !atomic_cas(&recovery_callback_pending, 0, 1)) {
+		k_work_reschedule(&recovery_work, K_MSEC(RECOVERY_QUEUE_RETRY_MS));
 		return;
 	}
 
