@@ -113,6 +113,7 @@ static atomic_t zigbee_network_ready;
 static bool ota_in_progress;
 static bool running_image_confirmed;
 static struct k_work_delayable recovery_work;
+static struct k_work_delayable periodic_rearm_work;
 static atomic_t recovery_active;
 static atomic_t recovery_callback_pending;
 static atomic_t recovery_callback_running;
@@ -123,7 +124,7 @@ static atomic_t factory_reset_active;
 static uint32_t recovery_attempt;
 static uint32_t recovery_backoff_s = RECOVERY_BACKOFF_1_S;
 static int64_t recovery_last_request_ms;
-static uint8_t periodic_rearm_retries;
+static uint32_t periodic_rearm_retries;
 static uint32_t forced_reports_requested;
 static uint32_t forced_reports_attempted;
 static uint32_t forced_reports_completed;
@@ -139,6 +140,7 @@ static void recovery_manual_request(void);
 static void recovery_end(const char *reason);
 static void short_button_action_cb(zb_uint8_t param);
 static void periodic_rearm_retry(zb_bufid_t bufid);
+static void periodic_rearm_work_handler(struct k_work *work);
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -561,6 +563,7 @@ static void do_factory_reset(zb_uint8_t param)
 	atomic_set(&zigbee_network_ready, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
+	k_work_cancel_delayable(&periodic_rearm_work);
 	zb_bdb_reset_via_local_action(param);
 }
 
@@ -728,10 +731,7 @@ static void cancel_periodic_alarms(void)
 	if (ret != RET_OK && ret != RET_NOT_FOUND) {
 		LOG_WRN("Battery alarm cancel failed: %d", ret);
 	}
-	ret = ZB_SCHEDULE_APP_ALARM_CANCEL(periodic_rearm_retry, 0);
-	if (ret != RET_OK && ret != RET_NOT_FOUND) {
-		LOG_WRN("Periodic retry alarm cancel failed: %d", ret);
-	}
+	k_work_cancel_delayable(&periodic_rearm_work);
 }
 
 static void schedule_periodic_alarms(void);
@@ -746,13 +746,11 @@ static void schedule_periodic_alarms(void)
 {
 	zb_ret_t sensor_ret;
 	zb_ret_t battery_ret;
-	zb_ret_t retry_ret;
 
 	if (!atomic_get(&zigbee_network_ready) || atomic_get(&recovery_active)) {
 		return;
 	}
 
-	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(periodic_rearm_retry, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
 	sensor_ret = ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
@@ -761,24 +759,35 @@ static void schedule_periodic_alarms(void)
 		(zb_time_t)BATTERY_READ_INTERVAL_S * ZB_MILLISECONDS_TO_BEACON_INTERVAL(1000));
 	if (sensor_ret == RET_OK && battery_ret == RET_OK) {
 		periodic_rearm_retries = 0;
+		k_work_cancel_delayable(&periodic_rearm_work);
 		return;
 	}
 
 	/* Keep the pair all-or-nothing so a retry cannot duplicate one alarm. */
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(battery_periodic, 0);
-	LOG_WRN("Periodic alarm rearm failed: sensor=%d battery=%d retry=%u",
-		sensor_ret, battery_ret, periodic_rearm_retries);
-	if (periodic_rearm_retries >= 3) {
-		LOG_ERR("Periodic alarm rearm retries exhausted");
+	periodic_rearm_retries++;
+	LOG_WRN("Periodic alarm rearm failed: sensor=%d battery=%d retry=%u; retrying in %dms",
+		sensor_ret, battery_ret, periodic_rearm_retries,
+		RECOVERY_QUEUE_RETRY_MS);
+	k_work_reschedule(&periodic_rearm_work, K_MSEC(RECOVERY_QUEUE_RETRY_MS));
+}
+
+static void periodic_rearm_work_handler(struct k_work *work)
+{
+	zb_ret_t ret;
+
+	ARG_UNUSED(work);
+	if (!atomic_get(&zigbee_network_ready) || atomic_get(&recovery_active)) {
 		return;
 	}
 
-	periodic_rearm_retries++;
-	retry_ret = ZB_SCHEDULE_APP_ALARM(periodic_rearm_retry, 0,
-		ZB_MILLISECONDS_TO_BEACON_INTERVAL(RECOVERY_QUEUE_RETRY_MS));
-	if (retry_ret != RET_OK) {
-		LOG_ERR("Periodic alarm retry queue failed: %d", retry_ret);
+	ret = zigbee_schedule_callback(periodic_rearm_retry, 0);
+	if (ret != RET_OK) {
+		LOG_WRN("Periodic rearm callback queue failed: %d; retrying in %dms",
+			ret, RECOVERY_QUEUE_RETRY_MS);
+		k_work_reschedule(&periodic_rearm_work,
+			K_MSEC(RECOVERY_QUEUE_RETRY_MS));
 	}
 }
 
@@ -993,6 +1002,8 @@ static void network_ready_after_signal(zb_zdo_app_signal_type_t sig)
 	recovery_end("network ready");
 	atomic_set(&factory_reset_active, 0);
 	atomic_set(&zigbee_network_ready, 1);
+	periodic_rearm_retries = 0;
+	k_work_cancel_delayable(&periodic_rearm_work);
 	set_ota_transfer_mode(false);
 	confirm_running_image();
 	LOG_INF("Zigbee joined/rejoined (signal=%d), sensor=%us battery=%us", sig,
@@ -1150,6 +1161,7 @@ int main(void)
 
 	LOG_INF("Frostbee production app boot (OTA package test)");
 	k_work_init_delayable(&recovery_work, recovery_work_handler);
+	k_work_init_delayable(&periodic_rearm_work, periodic_rearm_work_handler);
 
 	try_enable_usb_logs();
 
