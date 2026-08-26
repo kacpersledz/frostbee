@@ -16,6 +16,8 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/dfu/mcuboot.h>
@@ -50,6 +52,7 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 
 #define SENSOR_READ_INTERVAL_S   600
 #define BATTERY_READ_INTERVAL_S  64800
+#define SHT40_STARTUP_DELAY_MS   2
 #define SED_LONG_POLL_MS       3000
 #define OTA_LONG_POLL_MS       500
 
@@ -90,8 +93,11 @@ struct zb_device_ctx {
 static struct zb_device_ctx dev_ctx;
 
 static const struct device *sht = DEVICE_DT_GET(DT_NODELABEL(sht40));
+static const struct device *sht_i2c = DEVICE_DT_GET(DT_BUS(DT_NODELABEL(sht40)));
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
 static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_en), gpios);
+static const struct gpio_dt_spec sht40_power =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(sht40_power_en), gpios);
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
@@ -126,6 +132,10 @@ static struct adc_sequence adc_seq = {
 	.buffer = &adc_sample_buffer,
 	.buffer_size = sizeof(adc_sample_buffer),
 	.resolution = ADC_RESOLUTION,
+};
+
+struct sht40_power_session {
+	bool i2c_acquired;
 };
 
 ZB_ZCL_DECLARE_BASIC_ATTRIB_LIST_EXT(
@@ -258,11 +268,159 @@ static void clusters_attr_init(void)
     dev_ctx.battery_series_count = 2;
 }
 
+static int sht40_i2c_establish_idle(void)
+{
+	enum pm_device_state state;
+	int ret;
+
+	if (!device_is_ready(sht_i2c)) {
+		return -ENODEV;
+	}
+
+	if (!pm_device_runtime_is_enabled(sht_i2c)) {
+		ret = pm_device_runtime_enable(sht_i2c);
+		if (ret < 0) {
+			LOG_ERR("Failed to enable I2C runtime PM: %d", ret);
+			return ret;
+		}
+	}
+
+	ret = pm_device_state_get(sht_i2c, &state);
+	if (ret < 0) {
+		LOG_ERR("Failed to read I2C PM state: %d", ret);
+		return ret;
+	}
+
+	if (state == PM_DEVICE_STATE_SUSPENDED) {
+		return 0;
+	}
+
+	/*
+	 * Runtime PM should synchronously suspend an idle nRF TWIM device when
+	 * enabled. Re-enable it only as a startup fallback, before this
+	 * application has acquired any runtime PM reference.
+	 */
+	if (state != PM_DEVICE_STATE_ACTIVE) {
+		LOG_ERR("Unexpected initial I2C PM state: %s", pm_device_state_str(state));
+		return -EIO;
+	}
+
+	LOG_WRN("I2C runtime PM enabled but active; re-establishing idle state");
+	ret = pm_device_runtime_disable(sht_i2c);
+	if (ret < 0) {
+		LOG_ERR("Failed to disable I2C runtime PM: %d", ret);
+		return ret;
+	}
+
+	ret = pm_device_runtime_enable(sht_i2c);
+	if (ret < 0) {
+		LOG_ERR("Failed to re-enable I2C runtime PM: %d", ret);
+		return ret;
+	}
+
+	ret = pm_device_state_get(sht_i2c, &state);
+	if (ret < 0) {
+		LOG_ERR("Failed to verify I2C idle state: %d", ret);
+		return ret;
+	}
+
+	if (state != PM_DEVICE_STATE_SUSPENDED) {
+		LOG_ERR("I2C did not enter suspended state: %s", pm_device_state_str(state));
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int sht40_power_off(struct sht40_power_session *session)
+{
+	int first_error = 0;
+	int ret;
+
+	if (session->i2c_acquired) {
+		ret = pm_device_runtime_put(sht_i2c);
+		if (ret < 0) {
+			LOG_ERR("Failed to suspend SHT40 I2C bus: %d", ret);
+			first_error = ret;
+		} else {
+			session->i2c_acquired = false;
+		}
+	}
+
+	ret = gpio_pin_set_dt(&sht40_power, 0);
+	if (ret < 0) {
+		LOG_ERR("Failed to power off SHT40: %d", ret);
+		if (first_error == 0) {
+			first_error = ret;
+		}
+	}
+
+	return first_error;
+}
+
+static int sht40_power_on(struct sht40_power_session *session)
+{
+	int ret;
+
+	session->i2c_acquired = false;
+
+	ret = gpio_pin_set_dt(&sht40_power, 1);
+	if (ret < 0) {
+		LOG_ERR("Failed to power on SHT40: %d", ret);
+		return ret;
+	}
+
+	ret = pm_device_runtime_get(sht_i2c);
+	if (ret < 0) {
+		LOG_ERR("Failed to resume SHT40 I2C bus: %d", ret);
+		(void)sht40_power_off(session);
+		return ret;
+	}
+
+	session->i2c_acquired = true;
+	k_msleep(SHT40_STARTUP_DELAY_MS);
+
+	return 0;
+}
+
+static int sht40_init(void)
+{
+	struct sht40_power_session session;
+	int ret;
+	int cleanup_ret;
+
+	ret = sht40_power_on(&session);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = device_init(sht);
+	if (ret < 0) {
+		LOG_ERR("SHT4X initialization failed: %d", ret);
+	}
+
+	cleanup_ret = sht40_power_off(&session);
+	if (ret < 0) {
+		return ret;
+	}
+	if (cleanup_ret < 0) {
+		return cleanup_ret;
+	}
+
+	if (!device_is_ready(sht)) {
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
 {
+	struct sht40_power_session session;
 	struct sensor_value temp;
 	struct sensor_value hum;
-	int ret;
+	int ret = 0;
+	int cleanup_ret;
 	int64_t temp_micro;
 	int64_t hum_micro;
 
@@ -270,19 +428,24 @@ static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
 		return -ENODEV;
 	}
 
-	ret = sensor_sample_fetch(sht);
+	ret = sht40_power_on(&session);
 	if (ret < 0) {
 		return ret;
+	}
+
+	ret = sensor_sample_fetch(sht);
+	if (ret < 0) {
+		goto cleanup;
 	}
 
 	ret = sensor_channel_get(sht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
 	if (ret < 0) {
-		return ret;
+		goto cleanup;
 	}
 
 	ret = sensor_channel_get(sht, SENSOR_CHAN_HUMIDITY, &hum);
 	if (ret < 0) {
-		return ret;
+		goto cleanup;
 	}
 
 	temp_micro = (int64_t)temp.val1 * 1000000LL + temp.val2;
@@ -292,7 +455,14 @@ static int read_sensor_once(zb_int16_t *temp_centi, zb_uint16_t *hum_centi)
 
 	log_fixed2("Temperature [C]", *temp_centi);
 	log_fixed2("Humidity [%]", *hum_centi);
-	return 0;
+
+cleanup:
+	cleanup_ret = sht40_power_off(&session);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return cleanup_ret;
 }
 
 static zb_uint8_t interpolate(int32_t x, int32_t x_low, int32_t y_low, int32_t x_high, int32_t y_high) {
@@ -806,6 +976,23 @@ int main(void)
 
 	try_enable_usb_logs();
 
+	if (!gpio_is_ready_dt(&sht40_power)) {
+		LOG_ERR("SHT40 power GPIO not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&sht40_power, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to set SHT40 power idle: %d", ret);
+		return ret;
+	}
+
+	ret = sht40_i2c_establish_idle();
+	if (ret < 0) {
+		LOG_ERR("Failed to establish SHT40 I2C idle state: %d", ret);
+		return ret;
+	}
+
 	if (!device_is_ready(adc_dev)) {
 		LOG_ERR("ADC not ready");
 		return -ENODEV;
@@ -828,9 +1015,10 @@ int main(void)
 		return ret;
 	}
 
-	if (!device_is_ready(sht)) {
-		LOG_ERR("SHT4X not ready");
-		return -ENODEV;
+	ret = sht40_init();
+	if (ret < 0) {
+		LOG_ERR("SHT4X startup initialization failed: %d", ret);
+		return ret;
 	}
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)

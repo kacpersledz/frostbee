@@ -18,6 +18,7 @@ Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT40 sensor and Z
 
 - **Board:** nRF52840 (nice!nano v2 clone from AliExpress)
 - **Sensor:** Sensirion SHT40-AD1B (I2C address 0x44)
+- **Sensor power switch:** A19T / AO3401A high-side P-MOSFET
 
 ### Pin Assignment
 
@@ -25,10 +26,33 @@ Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT40 sensor and Z
 |----------|-----|-------------|
 | **I2C SDA** | P0.24 | SHT40 sensor data |
 | **I2C SCL** | P1.00 | SHT40 sensor clock (100 kHz) |
+| **SHT40 Power** | P1.13 | P-MOSFET gate control (active LOW) |
 | **Battery ADC** | P0.29 (AIN5) | Battery voltage measurement |
 | **Battery Enable** | P0.02 | Voltage divider control (active LOW = GND) |
 | **Reset Button** | P0.31 | Factory reset / force read |
 | **Status LED** | P0.15 | Blue LED (active LOW) |
+
+### SHT40 Power Control
+
+The SHT40 is powered through an A19T / AO3401A high-side P-MOSFET so it only
+draws current while a measurement is in progress:
+
+```
+P1.13 ─── 4.7kΩ ─── Gate
+                       │
+                     100kΩ
+                       │
+3V3 ─── Source ────────┘
+          Drain ─── SHT40 VDD
+```
+
+- **P1.13 HIGH/inactive:** sensor power OFF
+- **P1.13 LOW/active:** sensor power ON
+- The 100kΩ gate-to-source resistor keeps the sensor OFF during reset and early startup.
+- Each read powers the sensor, resumes I2C, waits for startup, fetches temperature and
+  humidity, suspends I2C into its high-impedance pin state, and then removes sensor power.
+- With the SHT40 off between reads, idle current is expected to return close to the
+  measured 0.5mA baseline; this must be confirmed on hardware.
 
 ### Battery Voltage Measurement
 

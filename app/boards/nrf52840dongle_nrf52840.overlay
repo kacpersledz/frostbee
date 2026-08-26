@@ -39,6 +39,15 @@
 			label = "Battery voltage divider enable";
 		};
 	};
+
+	/* High-side P-MOSFET control for SHT40 VDD */
+	sht40_power {
+		compatible = "gpio-leds";
+		sht40_power_en: sht40_power_enable_pin {
+			gpios = <&gpio1 13 GPIO_ACTIVE_LOW>;  /* P1.13, active LOW = powered */
+			label = "SHT40 power enable";
+		};
+	};
 };
 
 /* ADC for battery voltage measurement on P0.29 (AIN5) */
@@ -61,6 +70,7 @@
 &i2c0 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";
+	zephyr,pm-device-runtime-auto;
 	pinctrl-0 = <&i2c0_default>;
 	pinctrl-1 = <&i2c0_sleep>;
 	pinctrl-names = "default", "sleep";
@@ -70,6 +80,7 @@
 		compatible = "sensirion,sht4x";
 		reg = <0x44>;
 		repeatability = <2>;
+		zephyr,deferred-init;
 	};
 };
 
