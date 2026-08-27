@@ -125,10 +125,36 @@ static uint32_t recovery_attempt;
 static uint32_t recovery_backoff_s = RECOVERY_BACKOFF_1_S;
 static int64_t recovery_last_request_ms;
 static uint32_t periodic_rearm_retries;
-static uint32_t forced_reports_requested;
-static uint32_t forced_reports_attempted;
-static uint32_t forced_reports_completed;
-static uint32_t forced_reports_failed;
+
+struct measurement_snapshot {
+	zb_int16_t temperature;
+	zb_uint16_t humidity;
+	zb_uint8_t battery_voltage;
+	zb_uint8_t battery_percentage;
+};
+
+enum button_report_frame {
+	BUTTON_REPORT_FRAME_TEMPERATURE,
+	BUTTON_REPORT_FRAME_HUMIDITY,
+	BUTTON_REPORT_FRAME_POWER_CONFIG,
+};
+
+struct button_report_transaction {
+	struct measurement_snapshot values;
+	uint32_t sequence_id;
+	uint32_t pending;
+	uint32_t requested;
+	uint32_t measurement_failed;
+	uint32_t queued;
+	uint32_t completed;
+	uint32_t failed;
+	uint32_t cancelled;
+	uint32_t rerouted_to_recovery;
+	enum button_report_frame frame;
+	bool active;
+};
+
+static struct button_report_transaction button_report;
 
 enum recovery_initial_trigger {
 	RECOVERY_INITIAL_DEFAULT_HELPER,
@@ -138,9 +164,11 @@ enum recovery_initial_trigger {
 
 static void recovery_manual_request(void);
 static void recovery_end(const char *reason);
+static void recovery_enter(const char *reason, enum recovery_initial_trigger initial);
 static void short_button_action_cb(zb_uint8_t param);
 static void periodic_rearm_retry(zb_bufid_t bufid);
 static void periodic_rearm_work_handler(struct k_work *work);
+static void button_report_start_next(void);
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -417,113 +445,411 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	return 0;
 }
 
-static int sensor_report(zb_bool_t force_report)
+static zb_zcl_status_t set_measurement_attribute(zb_uint16_t cluster_id,
+						 zb_uint16_t attr_id, void *value)
 {
-	zb_int16_t temp_centi;
-	zb_uint16_t hum_centi;
+	return zb_zcl_set_attr_val(FROSTBEE_ENDPOINT, cluster_id,
+		ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id, value, ZB_FALSE);
+}
+
+static bool measurement_attributes_present(void)
+{
+	return zb_zcl_get_attr_desc_a(FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID) != NULL &&
+		zb_zcl_get_attr_desc_a(FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID) != NULL &&
+		zb_zcl_get_attr_desc_a(FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID) != NULL &&
+		zb_zcl_get_attr_desc_a(FROSTBEE_ENDPOINT,
+			ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+			ZB_ZCL_CLUSTER_SERVER_ROLE,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID) != NULL;
+}
+
+static int commit_sensor_values(zb_int16_t temperature, zb_uint16_t humidity)
+{
+	zb_int16_t old_temperature = dev_ctx.temp_measure_value;
+	zb_uint16_t old_humidity = dev_ctx.hum_measure_value;
+	zb_zcl_status_t temp_status;
+	zb_zcl_status_t humidity_status;
+	zb_zcl_status_t rollback_status;
+
+	temp_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &temperature);
+	humidity_status = set_measurement_attribute(
+		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &humidity);
+	if (temp_status == ZB_ZCL_STATUS_SUCCESS &&
+	    humidity_status == ZB_ZCL_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	LOG_ERR("Sensor attribute commit failed: temperature=%u humidity=%u",
+		temp_status, humidity_status);
+	rollback_status = set_measurement_attribute(
+		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &old_temperature);
+	LOG_WRN("Sensor rollback: temperature=%u", rollback_status);
+	rollback_status = set_measurement_attribute(
+		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &old_humidity);
+	LOG_WRN("Sensor rollback: humidity=%u", rollback_status);
+	return -EIO;
+}
+
+static int commit_battery_values(zb_uint8_t voltage, zb_uint8_t percentage)
+{
+	zb_uint8_t old_voltage = dev_ctx.battery_voltage;
+	zb_uint8_t old_percentage = dev_ctx.battery_percentage;
+	zb_zcl_status_t voltage_status;
+	zb_zcl_status_t percentage_status;
+	zb_zcl_status_t rollback_status;
+
+	voltage_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &voltage);
+	percentage_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &percentage);
+	if (voltage_status == ZB_ZCL_STATUS_SUCCESS &&
+	    percentage_status == ZB_ZCL_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	LOG_ERR("Battery attribute commit failed: voltage=%u percentage=%u",
+		voltage_status, percentage_status);
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &old_voltage);
+	LOG_WRN("Battery rollback: voltage=%u", rollback_status);
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &old_percentage);
+	LOG_WRN("Battery rollback: percentage=%u", rollback_status);
+	return -EIO;
+}
+
+static int commit_measurement_snapshot(const struct measurement_snapshot *values)
+{
+	struct measurement_snapshot old = {
+		.temperature = dev_ctx.temp_measure_value,
+		.humidity = dev_ctx.hum_measure_value,
+		.battery_voltage = dev_ctx.battery_voltage,
+		.battery_percentage = dev_ctx.battery_percentage,
+	};
+	zb_zcl_status_t status[4];
+	zb_zcl_status_t rollback_status;
+
+	if (!measurement_attributes_present()) {
+		LOG_ERR("Button report attribute descriptor validation failed");
+		return -ENOENT;
+	}
+
+	status[0] = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, (void *)&values->temperature);
+	status[1] = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, (void *)&values->humidity);
+	status[2] = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+		(void *)&values->battery_voltage);
+	status[3] = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+		(void *)&values->battery_percentage);
+
+	LOG_INF("Button report %u attribute commits: temp=%u hum=%u voltage=%u percentage=%u",
+		button_report.sequence_id, status[0], status[1], status[2], status[3]);
+	if (status[0] == ZB_ZCL_STATUS_SUCCESS &&
+	    status[1] == ZB_ZCL_STATUS_SUCCESS &&
+	    status[2] == ZB_ZCL_STATUS_SUCCESS &&
+	    status[3] == ZB_ZCL_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &old.temperature);
+	LOG_WRN("Button report %u rollback temperature=%u",
+		button_report.sequence_id, rollback_status);
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, &old.humidity);
+	LOG_WRN("Button report %u rollback humidity=%u",
+		button_report.sequence_id, rollback_status);
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &old.battery_voltage);
+	LOG_WRN("Button report %u rollback voltage=%u",
+		button_report.sequence_id, rollback_status);
+	rollback_status = set_measurement_attribute(ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+		&old.battery_percentage);
+	LOG_WRN("Button report %u rollback percentage=%u",
+		button_report.sequence_id, rollback_status);
+	return -EIO;
+}
+
+static int sensor_report(void)
+{
+	zb_int16_t temperature;
+	zb_uint16_t humidity;
 	int ret;
 
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
-
-	ret = read_sensor_once(&temp_centi, &hum_centi);
+	ret = read_sensor_once(&temperature, &humidity);
 	if (ret < 0) {
 		LOG_ERR("Sensor read failed: %d", ret);
-		k_mutex_unlock(&sensor_mutex);
-		return ret;
+	} else {
+		ret = commit_sensor_values(temperature, humidity);
 	}
-
-	dev_ctx.temp_measure_value = temp_centi;
-	dev_ctx.hum_measure_value = hum_centi;
-
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-		(zb_uint8_t *)&dev_ctx.temp_measure_value,
-		force_report);
-
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-		(zb_uint8_t *)&dev_ctx.hum_measure_value,
-		force_report);
-
 	k_mutex_unlock(&sensor_mutex);
-	return 0;
+	return ret;
 }
 
-static int battery_report(zb_bool_t force_report)
+static int battery_report(void)
 {
-	zb_uint8_t battery_zcl;
-	zb_uint8_t battery_pct_zcl;
+	zb_uint8_t voltage;
+	zb_uint8_t percentage;
 	int ret;
 
 	k_mutex_lock(&sensor_mutex, K_FOREVER);
-
-	ret = read_battery_once(&battery_zcl, &battery_pct_zcl);
+	ret = read_battery_once(&voltage, &percentage);
 	if (ret < 0) {
 		LOG_ERR("Battery read failed: %d", ret);
-		k_mutex_unlock(&sensor_mutex);
-		return ret;
+	} else {
+		ret = commit_battery_values(voltage, percentage);
 	}
-
-	dev_ctx.battery_voltage = battery_zcl;
-	dev_ctx.battery_percentage = battery_pct_zcl;
-
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
-		(zb_uint8_t *)&dev_ctx.battery_voltage,
-		force_report);
-
-	ZB_ZCL_SET_ATTRIBUTE(
-		FROSTBEE_ENDPOINT,
-		ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-		ZB_ZCL_CLUSTER_SERVER_ROLE,
-		ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-		(zb_uint8_t *)&dev_ctx.battery_percentage,
-		force_report);
-
 	k_mutex_unlock(&sensor_mutex);
-	return 0;
+	return ret;
 }
 
-static void measurement_update(zb_bool_t force_report)
+static void measurement_update(void)
 {
-	int ret_sensor;
-	int ret_battery;
-
-	if (force_report) {
-		forced_reports_attempted++;
-	}
-
-	ret_sensor = sensor_report(force_report);
-	ret_battery = battery_report(force_report);
-
-	if (force_report) {
-		if ((ret_sensor < 0) || (ret_battery < 0)) {
-			forced_reports_failed++;
-		} else {
-			forced_reports_completed++;
-		}
-
-		LOG_INF("Forced report counters: requested=%u attempted=%u completed=%u failed=%u",
-			forced_reports_requested,
-			forced_reports_attempted,
-			forced_reports_completed,
-			forced_reports_failed);
-	}
+	(void)sensor_report();
+	(void)battery_report();
 }
 
 static void measurement_now_cb(zb_uint8_t param)
 {
 	ARG_UNUSED(param);
-	measurement_update(ZB_TRUE);
+	measurement_update();
+}
+
+static void button_report_log_counters(void)
+{
+	uint32_t accounted = button_report.completed +
+		button_report.measurement_failed + button_report.failed +
+		button_report.cancelled + button_report.rerouted_to_recovery +
+		button_report.pending + (button_report.active ? 1U : 0U);
+
+	LOG_INF("Button report counters: requested=%u measurement_failed=%u queued=%u completed=%u failed=%u cancelled=%u rerouted=%u pending=%u in_flight=%u",
+		button_report.requested, button_report.measurement_failed,
+		button_report.queued, button_report.completed, button_report.failed,
+		button_report.cancelled, button_report.rerouted_to_recovery,
+		button_report.pending, button_report.active ? 1U : 0U);
+	if (accounted != button_report.requested) {
+		LOG_ERR("Button report accounting mismatch: requested=%u accounted=%u",
+			button_report.requested, accounted);
+	}
+}
+
+static zb_ret_t button_report_submit_frame(enum button_report_frame frame);
+
+static void button_report_send_cb(zb_uint8_t bufid)
+{
+	zb_zcl_command_send_status_t *send_status;
+	zb_ret_t status;
+
+	if (bufid == ZB_BUF_INVALID) {
+		status = ZB_ZCL_STATUS_ABORT;
+	} else {
+		send_status = ZB_BUF_GET_PARAM(bufid, zb_zcl_command_send_status_t);
+		status = send_status->status;
+		zb_buf_free(bufid);
+	}
+
+	LOG_INF("Button report %u frame=%u callback status=%d",
+		button_report.sequence_id, button_report.frame, status);
+	if (!button_report.active) {
+		LOG_WRN("Ignoring stale button report callback");
+		return;
+	}
+	if (status != RET_OK) {
+		button_report.failed++;
+		button_report.active = false;
+		button_report_log_counters();
+		button_report_start_next();
+		return;
+	}
+
+	if (button_report.frame == BUTTON_REPORT_FRAME_POWER_CONFIG) {
+		button_report.completed++;
+		button_report.active = false;
+		LOG_INF("Button report %u completed: 4 attributes in 3 frames",
+			button_report.sequence_id);
+		button_report_log_counters();
+		button_report_start_next();
+		return;
+	}
+
+	button_report.frame++;
+	status = button_report_submit_frame(button_report.frame);
+	if (status != RET_OK) {
+		button_report.failed++;
+		button_report.active = false;
+		button_report_log_counters();
+		button_report_start_next();
+	}
+}
+
+static zb_ret_t button_report_submit_frame(enum button_report_frame frame)
+{
+	zb_bufid_t bufid;
+	zb_uint8_t *cmd_ptr;
+	zb_uint16_t destination = 0;
+	zb_uint16_t cluster_id;
+	zb_ret_t ret;
+
+	bufid = zb_buf_get_out();
+	if (bufid == ZB_BUF_INVALID) {
+		LOG_ERR("Button report %u frame=%u allocation failed",
+			button_report.sequence_id, frame);
+		return RET_NO_MEMORY;
+	}
+
+	cmd_ptr = ZB_ZCL_START_PACKET(bufid);
+	ZB_ZCL_CONSTRUCT_GENERAL_COMMAND_REQ_FRAME_CONTROL_A(cmd_ptr,
+		ZB_ZCL_FRAME_DIRECTION_TO_CLI,
+		ZB_ZCL_NOT_MANUFACTURER_SPECIFIC,
+		ZB_ZCL_ENABLE_DEFAULT_RESPONSE);
+	ZB_ZCL_CONSTRUCT_COMMAND_HEADER(cmd_ptr, ZB_ZCL_GET_SEQ_NUM(),
+		ZB_ZCL_CMD_REPORT_ATTRIB);
+
+	switch (frame) {
+	case BUTTON_REPORT_FRAME_TEMPERATURE:
+		cluster_id = ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT;
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr,
+			ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, ZB_ZCL_ATTR_TYPE_S16);
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr,
+			(zb_uint16_t)button_report.values.temperature);
+		break;
+	case BUTTON_REPORT_FRAME_HUMIDITY:
+		cluster_id = ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT;
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr,
+			ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, ZB_ZCL_ATTR_TYPE_U16);
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr, button_report.values.humidity);
+		break;
+	case BUTTON_REPORT_FRAME_POWER_CONFIG:
+		cluster_id = ZB_ZCL_CLUSTER_ID_POWER_CONFIG;
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, ZB_ZCL_ATTR_TYPE_U8);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, button_report.values.battery_voltage);
+		ZB_ZCL_PACKET_PUT_DATA16_VAL(cmd_ptr,
+			ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, ZB_ZCL_ATTR_TYPE_U8);
+		ZB_ZCL_PACKET_PUT_DATA8(cmd_ptr, button_report.values.battery_percentage);
+		break;
+	default:
+		zb_buf_free(bufid);
+		return RET_INVALID_PARAMETER;
+	}
+
+	button_report.frame = frame;
+	ret = zb_zcl_finish_and_send_packet(bufid, cmd_ptr,
+		(const zb_addr_u *)(const void *)&destination,
+		ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT, 0,
+		FROSTBEE_ENDPOINT, ZB_AF_HA_PROFILE_ID, cluster_id,
+		button_report_send_cb);
+	LOG_INF("Button report %u frame=%u cluster=0x%04x submit=%d",
+		button_report.sequence_id, frame, cluster_id, ret);
+	if (ret != RET_OK) {
+		/* Ownership transfers only when the stack accepts the send. */
+		zb_buf_free(bufid);
+		return ret;
+	}
+	if (frame == BUTTON_REPORT_FRAME_POWER_CONFIG) {
+		button_report.queued++;
+		LOG_INF("Button report %u queued: 4 attributes in 3 frames",
+			button_report.sequence_id);
+	}
+	return RET_OK;
+}
+
+static bool button_report_begin(void)
+{
+	int sensor_ret;
+	int battery_ret;
+	zb_ret_t send_ret;
+
+	button_report.sequence_id++;
+	button_report.active = true;
+	k_mutex_lock(&sensor_mutex, K_FOREVER);
+	sensor_ret = read_sensor_once(&button_report.values.temperature,
+		&button_report.values.humidity);
+	battery_ret = read_battery_once(&button_report.values.battery_voltage,
+		&button_report.values.battery_percentage);
+	if (sensor_ret < 0 || battery_ret < 0) {
+		k_mutex_unlock(&sensor_mutex);
+		button_report.measurement_failed++;
+		button_report.active = false;
+		LOG_ERR("Button report %u measurement failed: sensor=%d battery=%d",
+			button_report.sequence_id, sensor_ret, battery_ret);
+		button_report_log_counters();
+		return false;
+	}
+
+	LOG_INF("Button report %u measurement ready: temp=%d humidity=%u voltage=%u percentage=%u",
+		button_report.sequence_id, button_report.values.temperature,
+		button_report.values.humidity, button_report.values.battery_voltage,
+		button_report.values.battery_percentage);
+	if (commit_measurement_snapshot(&button_report.values) < 0) {
+		k_mutex_unlock(&sensor_mutex);
+		button_report.failed++;
+		button_report.active = false;
+		button_report_log_counters();
+		return false;
+	}
+	k_mutex_unlock(&sensor_mutex);
+
+	send_ret = button_report_submit_frame(BUTTON_REPORT_FRAME_TEMPERATURE);
+	if (send_ret != RET_OK) {
+		button_report.failed++;
+		button_report.active = false;
+		button_report_log_counters();
+		return false;
+	}
+	return true;
+}
+
+static void button_report_start_next(void)
+{
+	while (!button_report.active && button_report.pending > 0) {
+		button_report.pending--;
+		if (atomic_get(&factory_reset_active) || zb_bdb_is_factory_new() ||
+		    ota_in_progress) {
+			button_report.cancelled++;
+			LOG_INF("Queued button report cancelled by OTA/factory reset state");
+			button_report_log_counters();
+			continue;
+		}
+		if (atomic_get(&recovery_active) ||
+		    !atomic_get(&zigbee_network_ready) || !ZB_JOINED()) {
+			button_report.rerouted_to_recovery++;
+			LOG_INF("Queued button report rerouted to recovery");
+			if (!atomic_get(&recovery_active)) {
+				recovery_enter("queued button report while network unavailable",
+					RECOVERY_INITIAL_MANUAL);
+			} else {
+				recovery_manual_request();
+			}
+			button_report_log_counters();
+			continue;
+		}
+		if (button_report_begin()) {
+			return;
+		}
+	}
 }
 
 static void sensor_periodic(zb_bufid_t bufid)
@@ -533,7 +859,7 @@ static void sensor_periodic(zb_bufid_t bufid)
 		return;
 	}
 	if (!ota_in_progress) {
-		sensor_report(ZB_FALSE);
+		(void)sensor_report();
 	}
 	ZB_SCHEDULE_APP_ALARM(sensor_periodic, 0,
 			      (zb_time_t)SENSOR_READ_INTERVAL_S *
@@ -547,7 +873,7 @@ static void battery_periodic(zb_bufid_t bufid)
 		return;
 	}
 	if (!ota_in_progress) {
-		battery_report(ZB_FALSE);
+		(void)battery_report();
 	}
 	ZB_SCHEDULE_APP_ALARM(battery_periodic, 0,
 			      (zb_time_t)BATTERY_READ_INTERVAL_S *
@@ -826,7 +1152,8 @@ static void recovery_attempt_cb(zb_uint8_t param)
 	    queued_epoch != atomic_get(&recovery_epoch)) {
 		LOG_INF("Ignoring stale recovery callback (queued=%ld current=%ld active=%ld ready=%d factory_new=%d reset=%ld)",
 			(long)queued_epoch, (long)atomic_get(&recovery_epoch),
-			(long)atomic_get(&recovery_active), atomic_get(&zigbee_network_ready),
+			(long)atomic_get(&recovery_active),
+			(int)atomic_get(&zigbee_network_ready),
 			zb_bdb_is_factory_new(), (long)atomic_get(&factory_reset_active));
 		atomic_set(&recovery_callback_running, 0);
 		return;
@@ -985,9 +1312,11 @@ static void short_button_action_cb(zb_uint8_t param)
 		return;
 	}
 
-	LOG_INF("Short press: forced report");
-	forced_reports_requested++;
-	measurement_update(ZB_TRUE);
+	button_report.requested++;
+	button_report.pending++;
+	LOG_INF("Short press: button report requested=%u pending=%u",
+		button_report.requested, button_report.pending);
+	button_report_start_next();
 }
 
 static bool recovery_signal_success(zb_ret_t status)
@@ -1009,10 +1338,10 @@ static void network_ready_after_signal(zb_zdo_app_signal_type_t sig)
 	LOG_INF("Zigbee joined/rejoined (signal=%d), sensor=%us battery=%us", sig,
 		SENSOR_READ_INTERVAL_S, BATTERY_READ_INTERVAL_S);
 	if (recovered) {
-		(void)sensor_report(ZB_TRUE);
-		(void)battery_report(ZB_TRUE);
+		(void)sensor_report();
+		(void)battery_report();
 	} else {
-		measurement_update(ZB_FALSE);
+		measurement_update();
 	}
 	schedule_periodic_alarms();
 }
@@ -1140,9 +1469,8 @@ static void frostbee_zcl_cb(zb_uint8_t param)
                 LOG_INF("Battery configuration changed (Attr: 0x%04x). Recalculating...",
                         set_attr_param->attr_id);
 
-                /* * Trigger an immediate measurement.
-                 * measurement_update(ZB_TRUE) calls read_battery_once(),
-                 * which pulls the fresh values directly from dev_ctx.
+                /* Recalculate local measurement attributes in ZBOSS context.
+                 * Explicit button-report sequencing is intentionally separate.
                  */
                 ZB_SCHEDULE_APP_CALLBACK(measurement_now_cb, 0);
             }
