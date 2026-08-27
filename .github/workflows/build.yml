@@ -14,6 +14,28 @@ on:
       - '**'
 
 jobs:
+  converter-contract:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: zigbee2mqtt/package-lock.json
+
+      - name: Install converter test dependencies
+        working-directory: zigbee2mqtt
+        run: npm ci
+
+      - name: Test converter contract
+        working-directory: zigbee2mqtt
+        run: npm test
+
   build:
     runs-on: ubuntu-22.04
     container:

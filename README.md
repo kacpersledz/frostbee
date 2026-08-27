@@ -148,8 +148,8 @@ During OTA this can make transfer look stalled (very small progress and huge ETA
 
 Current app runtime switches to a temporary OTA transfer mode when download progress starts:
 
-- disable sleepy behavior (`zigbee_configure_sleepy_behavior(false)`)
-- reduce keepalive/poll interval from 3000 ms to 100 ms (`zb_set_keepalive_timeout(...)`)
+- remain a sleepy end device and reduce the parent poll interval from 3000 ms to
+  500 ms with runtime-safe ZBOSS poll controls
 - pause periodic sensor/battery attribute reports while OTA is in progress (to avoid extra unicast traffic competing with OTA blocks)
 - ignore short-button forced reports while OTA is in progress (same reason)
 
@@ -159,11 +159,20 @@ This is a normal pattern for battery devices: stay low power most of the time, t
 How to verify that fast OTA mode is actually active:
 
 - **From sensor logs (USB):** after first OTA progress event, look for
-  `OTA transfer mode enabled (sleep off, keepalive 100 ms)`.
+  `Poll mode: interval=500ms` with `ota=1`.
 - **From Zigbee2MQTT logs only (no USB):** during OTA, you should no longer see Frostbee periodic measurement publishes every ~15 s, because app reports are paused until OTA ends.
 - **From OTA metrics:** compare `update.progress` and `update.remaining` slope before/after this firmware; progress should move more steadily and ETA should drop faster if RF path is healthy.
 
 After an OTA error (or after reboot on success), the device returns to standard sleepy settings.
+
+### Fresh-pair commissioning
+
+After successful fresh network steering, Frostbee keeps its sleepy-end-device
+identity and temporarily polls every 500 ms for 60 seconds. This bounded window lets
+Zigbee2MQTT complete interview, binding, reporting configuration, and initial reads.
+Ordinary reboot and coordinator-recovery rejoins do not start the window. OTA and
+commissioning independently request fast polling, so finishing one operation cannot
+prematurely restore the normal 3000 ms interval while the other remains active.
 
 ### Coordinator outage recovery
 

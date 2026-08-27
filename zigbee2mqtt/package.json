@@ -1,0 +1,10 @@
+{
+  "name": "frostbee-zigbee2mqtt-contract",
+  "private": true,
+  "scripts": {
+    "test": "node --test frostbee.test.js"
+  },
+  "dependencies": {
+    "zigbee-herdsman-converters": "26.90.0"
+  }
+}
