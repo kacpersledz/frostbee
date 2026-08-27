@@ -15,8 +15,7 @@ advanced:
   enable_external_js: true
 ```
 
-This converter is contract-tested with Zigbee2MQTT 2.13.0 and its pinned
-`zigbee-herdsman-converters` 26.90.0 dependency.
+Zigbee2MQTT 2.13.0 is the validated and supported version for this converter.
 
 ### Docker
 
@@ -88,25 +87,21 @@ This converter is contract-tested with Zigbee2MQTT 2.13.0 and its pinned
 - Proper vendor name (Frostbee) and model (FBE_TH_1) in device list
 - Configures standard temperature, humidity, and battery clusters
 - Battery reporting with voltage and percentage
-- Binds temperature, humidity, and Power Configuration before configuring reports
-- Reads all measurements and Frostbee battery controls after configuration, so
-  useful state is published without waiting for a periodic value change
 
-## Pairing and configuration lifecycle
+## Pairing lifecycle
 
 After a fresh join, the firmware remains a sleepy end device but polls its parent
 every 500 ms for a bounded 60-second commissioning window. Zigbee2MQTT must finish
-interview and configuration during this window. Configuration performs these phases
-in order:
+interview and configuration during this window. After the window, the normal 3000 ms
+sleepy polling interval is restored.
 
-1. bind `msTemperatureMeasurement`, `msRelativeHumidity`, and `genPowerCfg`;
-2. configure temperature, humidity, battery-percentage, and battery-voltage reporting;
-3. read temperature, humidity, battery voltage/percentage, `battery_type`, and
-   `battery_series_count`.
-
-After the window, the normal 3000 ms sleepy polling interval is restored. Clicking
-**Configure** repeats the same idempotent sequence and must be sufficient without a
-subsequent **Interview**.
+Hardware validation confirmed that a clean pair completes with the external
+Frostbee definition and that button reports arrive immediately. With an older
+Zigbee2MQTT version, a manual Interview could temporarily select an unsupported
+generated definition even though a direct Basic-cluster read returned
+`modelId: FBE_TH_1` and `manufacturerName: Frostbee`; restarting Zigbee2MQTT restored
+the external definition. Repeating the same test with Zigbee2MQTT 2.13.0 fixed the
+Interview behavior without changing the firmware or `frostbee.js`.
 
 ## Troubleshooting
 
@@ -179,10 +174,9 @@ operation:
   `genPowerCfg`;
 - the complete exposes list and active external-converter name.
 
-Run the matrix from a removed/factory-new device record: pair, Configure, short
-press, Interview, short press, then restart Zigbee2MQTT. The external definition and
-all exposes must remain unchanged. This hardware matrix cannot be replaced by the
-repository's converter contract test.
+Run the matrix from a removed/factory-new device record on Zigbee2MQTT 2.13.0: pair,
+Configure, short press, Interview, short press, then restart Zigbee2MQTT. The external
+definition and all exposes must remain unchanged.
 
 ## Migration from v1.x
 
