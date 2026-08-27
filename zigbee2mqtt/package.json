@@ -5,6 +5,10 @@
     "test": "node --test frostbee.test.js"
   },
   "dependencies": {
+    "zigbee-herdsman": "10.8.0",
     "zigbee-herdsman-converters": "26.90.0"
+  },
+  "overrides": {
+    "zigbee-herdsman": "10.8.0"
   }
 }
