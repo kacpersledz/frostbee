@@ -3,9 +3,19 @@
 External converter for Frostbee sensor to make it a "supported" device in Zigbee2MQTT.
 Use `frostbee.js` as the primary converter file.
 
-## Installation (Zigbee2MQTT v2.0+)
+## Installation (Zigbee2MQTT 2.13.0)
 
 **Important:** Starting from Zigbee2MQTT v2.0, external converters are automatically loaded from the `data/external_converters/` folder. The `external_converters:` setting in `configuration.yaml` is **no longer used**.
+
+Zigbee2MQTT 2.11.0 and newer disable external JavaScript by default on new
+installations. Enable it explicitly before installing `frostbee.js`:
+
+```yaml
+advanced:
+  enable_external_js: true
+```
+
+Zigbee2MQTT 2.13.0 is the validated and supported version for this converter.
 
 ### Docker
 
@@ -78,6 +88,21 @@ Use `frostbee.js` as the primary converter file.
 - Configures standard temperature, humidity, and battery clusters
 - Battery reporting with voltage and percentage
 
+## Pairing lifecycle
+
+After a fresh join, the firmware remains a sleepy end device but polls its parent
+every 500 ms for a bounded 60-second commissioning window. Zigbee2MQTT must finish
+interview and configuration during this window. After the window, the normal 3000 ms
+sleepy polling interval is restored.
+
+Hardware validation confirmed that a clean pair completes with the external
+Frostbee definition and that button reports arrive immediately. With an older
+Zigbee2MQTT version, a manual Interview could temporarily select an unsupported
+generated definition even though a direct Basic-cluster read returned
+`modelId: FBE_TH_1` and `manufacturerName: Frostbee`; restarting Zigbee2MQTT restored
+the external definition. Repeating the same test with Zigbee2MQTT 2.13.0 fixed the
+Interview behavior without changing the firmware or `frostbee.js`.
+
 ## Troubleshooting
 
 ### Device shows as "Not supported" or "Unsupported"
@@ -115,6 +140,10 @@ This means the external converter is not being loaded. Check:
    - External converters are loaded at startup
    - After copying the file, always restart Z2M
 
+6. **Confirm external JavaScript is enabled on Zigbee2MQTT 2.11+:**
+   - Check `advanced.enable_external_js: true`
+   - Verify the log contains `Loaded external converter 'frostbee.js'`
+
 ### Device model doesn't match
 
 If the converter loads but device still shows as unsupported:
@@ -132,6 +161,22 @@ If temperature/humidity work but battery doesn't show:
 2. In Z2M device page → "Clusters" → ensure `genPowerCfg` is listed
 3. Force a reading: Press the reset button briefly on the device
 4. Wait for the next battery update (every 18 hours)
+
+### Configure or Interview changes the supported-device state
+
+Enable Zigbee2MQTT debug logging and capture the following before and after each
+operation:
+
+- Zigbee2MQTT version and the `frostbee.js` converter-load message;
+- Basic-cluster `modelID` (`FBE_TH_1`) and manufacturer (`Frostbee`);
+- interview/configure success or timeout errors;
+- endpoint 1 bindings for `msTemperatureMeasurement`, `msRelativeHumidity`, and
+  `genPowerCfg`;
+- the complete exposes list and active external-converter name.
+
+Run the matrix from a removed/factory-new device record on Zigbee2MQTT 2.13.0: pair,
+Configure, short press, Interview, short press, then restart Zigbee2MQTT. The external
+definition and all exposes must remain unchanged.
 
 ## Migration from v1.x
 
