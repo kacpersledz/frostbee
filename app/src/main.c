@@ -265,7 +265,7 @@ static void clusters_attr_init(void)
 	dev_ctx.basic_attr.hw_version = 1;
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.mf_name, "Frostbee", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.model_id, "FBE_TH_1", 8);
-	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260401", 8);
+	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.date_code, "20260827", 8);
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.sw_ver, FROSTBEE_SW_VERSION,
 		ZB_ZCL_STRING_CONST_SIZE(FROSTBEE_SW_VERSION));
 	ZB_ZCL_SET_STRING_VAL(dev_ctx.basic_attr.location_id, "", 0);
