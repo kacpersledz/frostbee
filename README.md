@@ -165,6 +165,22 @@ How to verify that fast OTA mode is actually active:
 
 After an OTA error (or after reboot on success), the device returns to standard sleepy settings.
 
+### Coordinator outage recovery
+
+For a previously commissioned device, loss of the coordinator/parent starts bounded
+Zigbee recovery bursts without erasing ZBOSS NVRAM. Burst starts are retried after
+5, 10, and then 15 minutes; subsequent retries remain capped at 15 minutes. A short
+button press during an outage requests an immediate burst without increasing that
+backoff. Factory-new devices and factory-reset commissioning use the normal Zigbee
+flow and never enter outage recovery.
+
+Periodic sensor and battery alarms pause while the network is unavailable and resume
+after a confirmed rejoin. If an OTA transfer is active when the parent disappears,
+the transfer is aborted and sleepy behavior is restored; a later OTA can be started
+normally. USB logs distinguish callback queueing, trigger dispatch, and the later
+Zigbee lifecycle result, and include the recovery epoch, attempt number, monotonic
+timestamp, and next backoff.
+
 If OTA is still too slow in your network, the next things to check are usually coordinator/router side limits instead of image format:
 
 - Zigbee2MQTT OTA block request pacing / in-flight block settings
