@@ -90,15 +90,14 @@ Zigbee2MQTT 2.13.0 is the validated and supported version for this converter.
 
 ## Pairing lifecycle
 
-After a fresh join, the firmware remains a sleepy end device but polls its parent
-every 500 ms for a bounded 60-second commissioning window. Zigbee2MQTT must finish
-interview and configuration during this window. After the window, the normal 3000 ms
-sleepy polling interval is restored.
+Frostbee remains a sleepy end device and uses its normal 3000 ms long-poll interval
+during pairing, interview, configuration, rejoining, and ordinary operation. Only an
+active OTA transfer temporarily selects 500 ms polling.
 
 Hardware validation confirmed that a clean pair completes with the external
 Frostbee definition and that button reports arrive immediately. With an older
-Zigbee2MQTT version, a manual Interview could temporarily select an unsupported
-generated definition even though a direct Basic-cluster read returned
+Zigbee2MQTT version, a manual Interview produced a yellow
+`Not supported: generated` result even though a direct Basic-cluster read returned
 `modelId: FBE_TH_1` and `manufacturerName: Frostbee`; restarting Zigbee2MQTT restored
 the external definition. Repeating the same test with Zigbee2MQTT 2.13.0 fixed the
 Interview behavior without changing the firmware or `frostbee.js`.
@@ -159,7 +158,7 @@ If temperature/humidity work but battery doesn't show:
 
 1. Check ZCL Power Configuration cluster is bound
 2. In Z2M device page → "Clusters" → ensure `genPowerCfg` is listed
-3. Force a reading: Press the reset button briefly on the device
+3. Force a reading: Briefly press the P0.31 application button (not RST/nRESET)
 4. Wait for the next battery update (every 18 hours)
 
 ### Configure or Interview changes the supported-device state

@@ -135,6 +135,26 @@ jobs:
             ${{ steps.ver.outputs.artifact }}
           if-no-files-found: warn
 
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/frostbee_complete.hex
+            ${{ steps.ver.outputs.artifact }}
+            frostbee.zigbee
+          generate_release_notes: true
+          body: |
+            ## Zigbee OTA — automatic update
+
+            Z2M will pick this up automatically if configured with:
+            ```yaml
+            ota:
+              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
+              update_check_interval: 1440
+            ```
+
+            **Zigbee OTA file version:** `${{ steps.ota.outputs.file_ver_hex }}` (`${{ steps.ota.outputs.file_ver_dec }}`)
+
       - name: Update OTA index on master
         env:
           ARTIFACT: ${{ steps.ver.outputs.artifact }}
@@ -156,24 +176,3 @@ jobs:
             git commit -m "chore: update OTA index for ${GITHUB_REF_NAME}"
             git push origin HEAD:master
           }
-        continue-on-error: true
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            build/frostbee_complete.hex
-            ${{ steps.ver.outputs.artifact }}
-            frostbee.zigbee
-          generate_release_notes: true
-          body: |
-            ## Zigbee OTA — automatic update
-
-            Z2M will pick this up automatically if configured with:
-            ```yaml
-            ota:
-              zigbee_ota_override_index_location: https://raw.githubusercontent.com/winterberryice/frostbee/master/ota_index.json
-              update_check_interval: 1440
-            ```
-
-            **Zigbee OTA file version:** `${{ steps.ota.outputs.file_ver_hex }}` (`${{ steps.ota.outputs.file_ver_dec }}`)
