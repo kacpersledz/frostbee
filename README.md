@@ -27,7 +27,7 @@ Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT40 sensor and Z
 | **I2C SCL** | P1.00 | SHT40 sensor clock (100 kHz) |
 | **Battery ADC** | P0.29 (AIN5) | Battery voltage measurement |
 | **Battery Enable** | P0.02 | Voltage divider control (active LOW = GND) |
-| **Reset Button** | P0.31 | Factory reset / force read |
+| **Application Button** | P0.31 | Factory reset / force read |
 | **Status LED** | P0.15 | Blue LED (active LOW) |
 
 ### Battery Voltage Measurement
@@ -51,10 +51,13 @@ BAT+ ─── R1 (10kΩ) ─── [P0.29/ADC] ─┬─── R2 (10kΩ) ─�
 | Temperature/Humidity | 600s (10 min) |
 | Battery Voltage | 64800s (18h) |
 
-### Reset Button (P0.31)
+### Application Button (P0.31)
 
 - **Short press (< 1s):** Forces immediate sensor + battery read
 - **Long press (≥ 5s):** Factory reset — leaves network, erases NVRAM, reboots into pairing mode
+
+The board's hardware **RST/nRESET** button only resets the MCU. Use the P0.31
+application button for short-press reporting and long-press factory reset.
 
 ## Flash Layout
 
@@ -159,20 +162,11 @@ This is a normal pattern for battery devices: stay low power most of the time, t
 How to verify that fast OTA mode is actually active:
 
 - **From sensor logs (USB):** after first OTA progress event, look for
-  `Poll mode: interval=500ms` with `ota=1`.
+  `OTA poll mode: enabled=1 interval=500ms`.
 - **From Zigbee2MQTT logs only (no USB):** during OTA, you should no longer see Frostbee periodic measurement publishes every ~15 s, because app reports are paused until OTA ends.
 - **From OTA metrics:** compare `update.progress` and `update.remaining` slope before/after this firmware; progress should move more steadily and ETA should drop faster if RF path is healthy.
 
 After an OTA error (or after reboot on success), the device returns to standard sleepy settings.
-
-### Fresh-pair commissioning
-
-After successful fresh network steering, Frostbee keeps its sleepy-end-device
-identity and temporarily polls every 500 ms for 60 seconds. This bounded window lets
-Zigbee2MQTT complete interview, binding, reporting configuration, and initial reads.
-Ordinary reboot and coordinator-recovery rejoins do not start the window. OTA and
-commissioning independently request fast polling, so finishing one operation cannot
-prematurely restore the normal 3000 ms interval while the other remains active.
 
 ### Coordinator outage recovery
 

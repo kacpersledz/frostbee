@@ -51,8 +51,7 @@ LOG_MODULE_REGISTER(frostbee, LOG_LEVEL_INF);
 #define SENSOR_READ_INTERVAL_S   600
 #define BATTERY_READ_INTERVAL_S  64800
 #define SED_LONG_POLL_MS       3000
-#define ACTIVE_LONG_POLL_MS     500
-#define COMMISSIONING_WINDOW_S   60
+#define OTA_LONG_POLL_MS         500
 
 #define RECOVERY_QUEUE_RETRY_MS 30000
 #define RECOVERY_BACKOFF_1_S    300
@@ -122,8 +121,6 @@ static atomic_t recovery_manual_kick;
 static atomic_t recovery_epoch;
 static atomic_t recovery_queued_epoch;
 static atomic_t factory_reset_active;
-static bool commissioning_active;
-static zb_uint8_t commissioning_epoch;
 static uint32_t recovery_attempt;
 static uint32_t recovery_backoff_s = RECOVERY_BACKOFF_1_S;
 static int64_t recovery_last_request_ms;
@@ -172,8 +169,7 @@ static void short_button_action_cb(zb_uint8_t param);
 static void periodic_rearm_retry(zb_bufid_t bufid);
 static void periodic_rearm_work_handler(struct k_work *work);
 static void button_report_start_next(void);
-static void commissioning_cancel(const char *reason);
-static void poll_mode_recompute(void);
+static void set_ota_poll_mode(bool enabled);
 
 static struct adc_channel_cfg adc_cfg = {
 	.gain = ADC_GAIN_1_6,
@@ -892,7 +888,15 @@ static void do_factory_reset(zb_uint8_t param)
 {
 	LOG_WRN("Factory reset requested, leaving network and erasing NVRAM");
 	atomic_set(&factory_reset_active, 1);
-	commissioning_cancel("factory reset");
+
+#if IS_ENABLED(CONFIG_ZIGBEE_FOTA)
+	if (ota_in_progress) {
+		LOG_WRN("Aborting OTA because factory reset was requested");
+		zigbee_fota_abort();
+		set_ota_poll_mode(false);
+	}
+#endif
+
 	recovery_end("factory reset");
 	atomic_set(&zigbee_network_ready, 0);
 	(void)ZB_SCHEDULE_APP_ALARM_CANCEL(sensor_periodic, 0);
@@ -1040,68 +1044,14 @@ static void confirm_running_image(void)
 	LOG_INF("Confirmed running MCUboot image after Zigbee join");
 }
 
-static void poll_mode_recompute(void)
+static void set_ota_poll_mode(bool enabled)
 {
 	/* Runtime poll control is ZBOSS-owned; callers must run in ZBOSS context. */
-	zb_time_t interval = (commissioning_active || ota_in_progress) ?
-		ACTIVE_LONG_POLL_MS : SED_LONG_POLL_MS;
+	zb_time_t interval = enabled ? OTA_LONG_POLL_MS : SED_LONG_POLL_MS;
 
+	ota_in_progress = enabled;
 	zb_zdo_pim_set_long_poll_interval(interval);
-	LOG_INF("Poll mode: interval=%ums commissioning=%d ota=%d",
-		interval, commissioning_active, ota_in_progress);
-}
-
-static void commissioning_timeout_cb(zb_uint8_t epoch)
-{
-	if (!commissioning_active || epoch != commissioning_epoch) {
-		LOG_INF("Ignoring stale commissioning timeout: queued=%u current=%u active=%d",
-			epoch, commissioning_epoch, commissioning_active);
-		return;
-	}
-
-	commissioning_active = false;
-	LOG_INF("Commissioning window ended: epoch=%u", epoch);
-	poll_mode_recompute();
-}
-
-static void commissioning_cancel(const char *reason)
-{
-	zb_uint8_t active_epoch = commissioning_epoch;
-	zb_ret_t ret;
-
-	commissioning_epoch++;
-	if (!commissioning_active) {
-		return;
-	}
-
-	commissioning_active = false;
-	ret = ZB_SCHEDULE_APP_ALARM_CANCEL(commissioning_timeout_cb, active_epoch);
-	if (ret != RET_OK && ret != RET_NOT_FOUND) {
-		LOG_WRN("Commissioning alarm cancel failed: %d", ret);
-	}
-	LOG_INF("Commissioning window cancelled: %s epoch=%u", reason, active_epoch);
-	poll_mode_recompute();
-}
-
-static void commissioning_start(void)
-{
-	zb_ret_t ret;
-
-	commissioning_cancel("restarted");
-	commissioning_epoch++;
-	commissioning_active = true;
-	poll_mode_recompute();
-	ret = ZB_SCHEDULE_APP_ALARM(commissioning_timeout_cb, commissioning_epoch,
-		(zb_time_t)COMMISSIONING_WINDOW_S * ZB_TIME_ONE_SECOND);
-	if (ret != RET_OK) {
-		LOG_ERR("Commissioning alarm schedule failed: %d", ret);
-		commissioning_active = false;
-		commissioning_epoch++;
-		poll_mode_recompute();
-		return;
-	}
-	LOG_INF("Commissioning window started: epoch=%u duration=%us interval=%ums",
-		commissioning_epoch, COMMISSIONING_WINDOW_S, ACTIVE_LONG_POLL_MS);
+	LOG_INF("OTA poll mode: enabled=%d interval=%ums", enabled, interval);
 }
 
 static void cancel_periodic_alarms(void)
@@ -1303,7 +1253,6 @@ static void recovery_enter(const char *reason, enum recovery_initial_trigger ini
 	}
 
 	atomic_inc(&recovery_epoch);
-	commissioning_cancel("network recovery");
 	atomic_set(&recovery_manual_kick, 0);
 	recovery_attempt = 0;
 	recovery_backoff_s = RECOVERY_BACKOFF_1_S;
@@ -1314,8 +1263,7 @@ static void recovery_enter(const char *reason, enum recovery_initial_trigger ini
 	if (ota_in_progress) {
 		LOG_WRN("Aborting OTA because Zigbee parent was lost");
 		zigbee_fota_abort();
-		ota_in_progress = false;
-		poll_mode_recompute();
+		set_ota_poll_mode(false);
 	}
 #endif
 
@@ -1393,11 +1341,7 @@ static void network_ready_after_signal(zb_zdo_app_signal_type_t sig)
 	atomic_set(&zigbee_network_ready, 1);
 	periodic_rearm_retries = 0;
 	k_work_cancel_delayable(&periodic_rearm_work);
-	if (sig == ZB_BDB_SIGNAL_STEERING && !recovery_was_active) {
-		commissioning_start();
-	} else {
-		poll_mode_recompute();
-	}
+	set_ota_poll_mode(false);
 	confirm_running_image();
 	LOG_INF("Zigbee joined/rejoined (signal=%d), sensor=%us battery=%us", sig,
 		SENSOR_READ_INTERVAL_S, BATTERY_READ_INTERVAL_S);
@@ -1416,23 +1360,20 @@ static void ota_evt_handler(const struct zigbee_fota_evt *evt)
 	switch (evt->id) {
 	case ZIGBEE_FOTA_EVT_PROGRESS:
 		if (!ota_in_progress) {
-			ota_in_progress = true;
-			poll_mode_recompute();
+			set_ota_poll_mode(true);
 		}
 		LOG_INF("OTA progress: %d%%", evt->dl.progress);
 		break;
 
 	case ZIGBEE_FOTA_EVT_FINISHED:
 		LOG_INF("OTA image ready, rebooting into MCUboot");
+		set_ota_poll_mode(false);
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 
 	case ZIGBEE_FOTA_EVT_ERROR:
 		LOG_ERR("OTA transfer failed");
-		if (ota_in_progress) {
-			ota_in_progress = false;
-			poll_mode_recompute();
-		}
+		set_ota_poll_mode(false);
 		break;
 
 	default:
