@@ -361,7 +361,21 @@ static zb_uint8_t interpolate(int32_t x, int32_t x_low, int32_t y_low, int32_t x
 }
 
 static zb_uint8_t calculate_pct_from_lookup(int32_t mv, zb_uint8_t type) {
-    if (type == BATTERY_TYPE_LITHIUM) {
+    if (type == BATTERY_TYPE_LIFEPO4) {
+        /* Intentional conservative project estimate for a 1S LiFePO4 pack. */
+        if (mv >= 3650) return 200;
+        if (mv >= 3500) return interpolate(mv, 3500, 190, 3650, 200);
+        if (mv >= 3400) return interpolate(mv, 3400, 160, 3500, 190);
+        if (mv >= 3350) return interpolate(mv, 3350, 120, 3400, 160);
+        if (mv >= 3300) return interpolate(mv, 3300, 90, 3350, 120);
+        if (mv >= 3250) return interpolate(mv, 3250, 70, 3300, 90);
+        if (mv >= 3200) return interpolate(mv, 3200, 55, 3250, 70);
+        if (mv >= 3100) return interpolate(mv, 3100, 35, 3200, 55);
+        if (mv >= 3000) return interpolate(mv, 3000, 20, 3100, 35);
+        if (mv >= 2900) return interpolate(mv, 2900, 10, 3000, 20);
+        if (mv >= 2800) return interpolate(mv, 2800, 0, 2900, 10);
+        return 0;
+    } else if (type == BATTERY_TYPE_LITHIUM) {
         if (mv >= 1700) return 200;
         if (mv >= 1600) return interpolate(mv, 1600, 190, 1700, 200);
         if (mv >= 1500) return interpolate(mv, 1500, 170, 1600, 190);
@@ -396,6 +410,7 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	int16_t samples[5];
 	int32_t adc_mv;
 	int32_t battery_mv;
+	int32_t battery_pct_input_mv;
 
 	if (!device_is_ready(adc_dev)) {
 		return -ENODEV;
@@ -420,14 +435,19 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	battery_mv = adc_mv * VDIV_FACTOR;
 	*battery_zcl = (zb_uint8_t)((battery_mv + 50) / 100);
 
-    uint8_t series_count = dev_ctx.battery_series_count;
-    if (series_count < 1 || series_count > 4) {
-        LOG_WRN("Series count %u out of range (1-4). Defaulting to 1.", series_count);
-        series_count = 1;
-    }
+	if (dev_ctx.battery_type == BATTERY_TYPE_LIFEPO4) {
+		battery_pct_input_mv = battery_mv;
+	} else {
+		uint8_t series_count = dev_ctx.battery_series_count;
+		if (series_count < 1 || series_count > 4) {
+			LOG_WRN("Series count %u out of range (1-4). Defaulting to 1.", series_count);
+			series_count = 1;
+		}
 
-    int32_t mv_per_cell = battery_mv / series_count;
-    *battery_pct_zcl = calculate_pct_from_lookup(mv_per_cell, dev_ctx.battery_type);
+		battery_pct_input_mv = battery_mv / series_count;
+	}
+
+	*battery_pct_zcl = calculate_pct_from_lookup(battery_pct_input_mv, dev_ctx.battery_type);
 
 	LOG_INF("Battery: %d mV (ZCL=%u), %u%% (ZCL=%u)",
 		battery_mv, *battery_zcl, *battery_pct_zcl / 2, *battery_pct_zcl);
