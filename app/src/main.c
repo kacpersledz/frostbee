@@ -96,7 +96,6 @@ static struct zb_device_ctx dev_ctx;
 
 static const struct device *sht = DEVICE_DT_GET(DT_NODELABEL(sht40));
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
-static const struct gpio_dt_spec vbat_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(vbat_en), gpios);
 
 #if DT_NODE_EXISTS(RESET_BUTTON_NODE)
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(RESET_BUTTON_NODE, gpios);
@@ -402,17 +401,9 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_OUTPUT_ACTIVE);
-	if (ret < 0) {
-		return ret;
-	}
-
-	k_msleep(2);
-
 	for (int i = 0; i < 5; i++) {
 		ret = adc_read(adc_dev, &adc_seq);
 		if (ret < 0) {
-			gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
 			return ret;
 		}
 
@@ -421,8 +412,6 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 			k_usleep(500);
 		}
 	}
-
-	gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
 
 	qsort(samples, 5, sizeof(int16_t), compare_int16);
 
@@ -1501,17 +1490,6 @@ int main(void)
 	if (!device_is_ready(adc_dev)) {
 		LOG_ERR("ADC not ready");
 		return -ENODEV;
-	}
-
-	if (!gpio_is_ready_dt(&vbat_enable)) {
-		LOG_ERR("VBAT enable GPIO not ready");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
-	if (ret < 0) {
-		LOG_ERR("Failed to set VBAT enable pin idle: %d", ret);
-		return ret;
 	}
 
 	ret = adc_channel_setup(adc_dev, &adc_cfg);

@@ -26,23 +26,23 @@ Built with Zephyr RTOS / nRF Connect SDK, using the Sensirion SHT40 sensor and Z
 | **I2C SDA** | P0.24 | SHT40 sensor data |
 | **I2C SCL** | P1.00 | SHT40 sensor clock (100 kHz) |
 | **Battery ADC** | P0.29 (AIN5) | Battery voltage measurement |
-| **Battery Enable** | P0.02 | Voltage divider control (active LOW = GND) |
+| **P0.02** | — | Unused |
 | **Application Button** | P0.31 | Factory reset / force read |
 | **Status LED** | P0.15 | Blue LED (active LOW) |
 
 ### Battery Voltage Measurement
 
-The device measures battery voltage (3× AA in series, 3.0V–4.5V) using a voltage divider with GPIO control for power saving:
+The device measures battery voltage (3× AA in series, 3.0V–4.5V) using a permanently connected 100 kΩ / 100 kΩ voltage divider:
 
 ```
-BAT+ ─── R1 (10kΩ) ─── [P0.29/ADC] ─┬─── R2 (10kΩ) ─── [P0.02/GPIO] ─── GND
+BAT+ ─── R1 (100kΩ) ─── [P0.29/ADC] ─┬─── R2 (100kΩ) ─── GND
                                       │
                                       └─── C (0.1µF) ─── GND
 ```
 
-- **P0.02** is INPUT (high-Z) when idle → 0µA consumption
-- During measurement, **P0.02** goes OUTPUT LOW → connects divider to GND
-- ADC reads P0.29, then P0.02 returns to INPUT
+- **P0.02** is unused and is not involved in battery measurement
+- The divider remains connected between VBAT and GND, drawing approximately 16.5µA at 3.3V
+- ADC reads P0.29 whenever a battery measurement is requested
 
 ### Measurement Intervals
 
