@@ -16,7 +16,7 @@ const definition = {
         }),
         m.enumLookup({
             name: 'battery_type',
-            lookup: {'alkaline': 0, 'nimh': 1, 'lithium': 2},
+            lookup: {'alkaline': 0, 'nimh': 1, 'lithium': 2, 'lifepo4': 3},
             cluster: 'genPowerCfg',
             attribute: {ID: 0xff01, type: 0x20},
         }),
