@@ -24,20 +24,12 @@
 		sw0 = &reset_button;
 	};
 
-	/* Battery voltage divider control */
+	/* Permanently connected battery voltage divider */
 	vbat {
 		compatible = "voltage-divider";
 		io-channels = <&adc 5>;  /* P0.29 = AIN5 */
-		output-ohms = <10000>;   /* R2 = 10kΩ */
-		full-ohms = <20000>;     /* R1 + R2 = 20kΩ */
-	};
-
-	vbat_enable {
-		compatible = "gpio-leds";
-		vbat_en: vbat_enable_pin {
-			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;  /* P0.02, active LOW = GND */
-			label = "Battery voltage divider enable";
-		};
+		output-ohms = <100000>;  /* R2 = 100kΩ */
+		full-ohms = <200000>;    /* R1 + R2 = 200kΩ */
 	};
 };
 
