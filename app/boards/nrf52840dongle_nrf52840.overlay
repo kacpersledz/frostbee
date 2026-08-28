@@ -24,7 +24,7 @@
 		sw0 = &reset_button;
 	};
 
-	/* Battery voltage divider control */
+	/* Battery voltage divider control: active LOW = PMOS/divider ON */
 	vbat {
 		compatible = "voltage-divider";
 		io-channels = <&adc 5>;  /* P0.29 = AIN5 */
@@ -35,8 +35,8 @@
 	vbat_enable {
 		compatible = "gpio-leds";
 		vbat_en: vbat_enable_pin {
-			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;  /* P0.02, active LOW = GND */
-			label = "Battery voltage divider enable";
+			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;  /* P0.02, active LOW = PMOS/divider ON */
+			label = "Battery voltage divider PMOS enable";
 		};
 	};
 };

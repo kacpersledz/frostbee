@@ -394,6 +394,7 @@ static zb_uint8_t calculate_pct_from_lookup(int32_t mv, zb_uint8_t type) {
 static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zcl)
 {
 	int ret;
+	int disable_ret;
 	int16_t samples[5];
 	int32_t adc_mv;
 	int32_t battery_mv;
@@ -402,8 +403,9 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_OUTPUT_ACTIVE);
+	ret = gpio_pin_set_dt(&vbat_enable, 1);
 	if (ret < 0) {
+		LOG_ERR("Failed to enable battery voltage divider: %d", ret);
 		return ret;
 	}
 
@@ -412,8 +414,7 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 	for (int i = 0; i < 5; i++) {
 		ret = adc_read(adc_dev, &adc_seq);
 		if (ret < 0) {
-			gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
-			return ret;
+			goto disable_divider;
 		}
 
 		samples[i] = adc_sample_buffer;
@@ -422,7 +423,17 @@ static int read_battery_once(zb_uint8_t *battery_zcl, zb_uint8_t *battery_pct_zc
 		}
 	}
 
-	gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
+disable_divider:
+	disable_ret = gpio_pin_set_dt(&vbat_enable, 0);
+	if (disable_ret < 0) {
+		LOG_ERR("Failed to disable battery voltage divider: %d", disable_ret);
+	}
+	if (ret < 0) {
+		return ret;
+	}
+	if (disable_ret < 0) {
+		return disable_ret;
+	}
 
 	qsort(samples, 5, sizeof(int16_t), compare_int16);
 
@@ -1508,7 +1519,7 @@ int main(void)
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_INPUT);
+	ret = gpio_pin_configure_dt(&vbat_enable, GPIO_OUTPUT_INACTIVE);
 	if (ret < 0) {
 		LOG_ERR("Failed to set VBAT enable pin idle: %d", ret);
 		return ret;
